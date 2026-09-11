@@ -1,0 +1,16 @@
+{
+  "websites": [
+    {
+      "name": "WesternSydneyUniversity",
+      "url": "https://www.westernsydney.edu.au/"
+    },
+    {
+      "name": "AWS",
+      "url": "https://aws.amazon.com/"
+    },
+    {
+      "name": "GitHub",
+      "url": "https://github.com/"
+    }
+  ]
+}

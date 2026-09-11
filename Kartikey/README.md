@@ -151,6 +151,90 @@ This confirmed that the Lambda successfully reached the monitored website and pu
 | `iam.PolicyStatement` | Grants permission to publish metrics | [IAM PolicyStatement](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_iam/PolicyStatement.html) |
 | `put_metric_data` | Publishes custom CloudWatch metrics | [Boto3 PutMetricData](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/cloudwatch/client/put_metric_data.html) |
 
+## Week 3: Automated Multi-Website Monitoring
+
+During Week 3, I extended the Week 2 Lambda function into an automated multi-website crawler.
+
+The system now:
+
+- Reads a custom list of websites from `websites.json`.
+- Checks Western Sydney University, AWS and GitHub.
+- Records availability as `1` or `0`.
+- Measures latency in milliseconds.
+- Publishes separate CloudWatch metrics using the `Website` dimension.
+- Runs automatically every five minutes using Amazon EventBridge.
+- Displays website health through a CloudWatch dashboard.
+- Uses availability and latency alarms to detect problems.
+
+### Monitoring Architecture
+
+```text
+EventBridge schedule
+        |
+        v
+Lambda web crawler
+        |
+        v
+Read websites.json
+        |
+        v
+Check each website
+        |
+        v
+Publish availability and latency
+        |
+        +----> CloudWatch dashboard
+        |
+        +----> CloudWatch alarms
+```
+
+### Monitored Websites
+
+| Website | URL |
+|---|---|
+| Western Sydney University | https://www.westernsydney.edu.au/ |
+| AWS | https://aws.amazon.com/ |
+| GitHub | https://github.com/ |
+
+### Monitoring Configuration
+
+| Setting | Value |
+|---|---|
+| AWS Region | `us-east-1` |
+| Schedule | Every 5 minutes |
+| Metric namespace | `Kartikey/WebsiteMonitoring` |
+| Availability threshold | Below `1` |
+| Latency threshold | Above `3000 ms` |
+| Evaluation periods | `1` |
+| Dashboard | `Kartikey-Website-Health-Dashboard` |
+
+### Deployment Verification
+
+The multi-website crawler was successfully synthesised and deployed using AWS CDK.
+
+A manual test returned:
+
+| Website | HTTP status | Availability | Example latency |
+|---|---:|---:|---:|
+| Western Sydney University | 200 | 1 | 548.07 ms |
+| AWS | 200 | 1 | 91.89 ms |
+| GitHub | 200 | 1 | 40.20 ms |
+
+CloudWatch confirmed separate `Availability` and `Latency` metrics for all three websites. Six CloudWatch alarms were created: one availability alarm and one latency alarm for each website.
+
+### Week 3 Code Sources
+
+| Project code | Purpose | Official AWS documentation |
+|---|---|---|
+| `events.Rule` | Creates the automatic EventBridge rule | [EventBridge Rule](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Rule.html) |
+| `events.Schedule.rate` | Runs the crawler every five minutes | [EventBridge Schedule](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Schedule.html) |
+| `targets.LambdaFunction` | Connects EventBridge to Lambda | [Lambda event target](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events_targets/LambdaFunction.html) |
+| `cloudwatch.Metric` | Represents each website metric | [CloudWatch Metric](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Metric.html) |
+| `cloudwatch.Dashboard` | Creates the monitoring dashboard | [CloudWatch Dashboard](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Dashboard.html) |
+| `cloudwatch.GraphWidget` | Displays metrics on the dashboard | [CloudWatch GraphWidget](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/GraphWidget.html) |
+| `cloudwatch.Alarm` | Creates availability and latency alarms | [CloudWatch Alarm](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Alarm.html) |
+| `put_metric_data` | Publishes custom metrics from Lambda | [Boto3 PutMetricData](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/cloudwatch/client/put_metric_data.html) |
+
 ## References
 
 - [AWS CDK Python API Reference](https://docs.aws.amazon.com/cdk/api/v2/python/)
