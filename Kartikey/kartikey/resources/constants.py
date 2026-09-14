@@ -30,3 +30,16 @@ EVALUATION_PERIODS = 1
 
 # CloudWatch dashboard
 DASHBOARD_NAME = "Kartikey-Website-Health-Dashboard"
+
+# Week 6 SNS configuration
+ALARM_TOPIC_NAME = "kartikey-website-alarm-notifications"
+
+# Week 6 DynamoDB configuration
+ALARM_TABLE_NAME = "Kartikey-Website-Alarm-Logs"
+
+# Week 6 alarm logger Lambda configuration
+ALARM_LOGGER_FUNCTION_NAME = "kartikey-alarm-logger"
+ALARM_LOGGER_DESCRIPTION = (
+    "Receives CloudWatch alarm notifications and stores them in DynamoDB"
+)
+ALARM_LOGGER_TIMEOUT_SECONDS = 30
