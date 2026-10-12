@@ -7,3 +7,7 @@ __pycache__
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+
+# Temporary integration test responses
+beta-response.json
+prod-response.json
