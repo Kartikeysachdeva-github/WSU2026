@@ -9,7 +9,7 @@ import boto3
 from constants import (
     AVAILABILITY_METRIC_NAME,
     LATENCY_METRIC_NAME,
-    METRIC_NAMESPACE,
+    METRIC_NAMESPACE as DEFAULT_METRIC_NAMESPACE,
     REQUEST_TIMEOUT_SECONDS,
     WEBSITES_FILE,
     WEBSITE_DIMENSION_NAME,
@@ -18,7 +18,12 @@ from constants import (
 
 cloudwatch = boto3.client("cloudwatch")
 
+metric_namespace = os.environ.get(
+    "METRIC_NAMESPACE",
+    DEFAULT_METRIC_NAMESPACE,
+)
 
+    
 def load_websites():
     file_path = os.path.join(os.path.dirname(__file__), WEBSITES_FILE)
 
@@ -58,7 +63,7 @@ def check_website(website):
     # Official AWS Boto3 documentation:
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/cloudwatch/client/put_metric_data.html
     cloudwatch.put_metric_data(
-        Namespace=METRIC_NAMESPACE,
+        Namespace=metric_namespace,
         MetricData=[
             {
                 "MetricName": AVAILABILITY_METRIC_NAME,

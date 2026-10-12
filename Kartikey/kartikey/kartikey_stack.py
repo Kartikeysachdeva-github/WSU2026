@@ -45,9 +45,23 @@ class KartikeyStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
+        environment_name: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # Beta and Prod use separate resource names and metrics.
+        # An empty environment name keeps the original deployment names.
+        suffix = (
+            f"-{environment_name.lower()}"
+            if environment_name
+            else ""
+        )
+        metric_namespace = (
+            f"{METRIC_NAMESPACE}/{environment_name}"
+            if environment_name
+            else METRIC_NAMESPACE
+        )
 
         websites_path = (
             Path(__file__).parent / "resources" / WEBSITES_FILE
@@ -65,12 +79,15 @@ class KartikeyStack(Stack):
         web_health_function = lambda_.Function(
             self,
             "WebHealthFunction",
-            function_name=FUNCTION_NAME,
+            function_name=f"{FUNCTION_NAME}{suffix}",
             description=FUNCTION_DESCRIPTION,
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="webHealth.handler",
             code=lambda_.Code.from_asset("kartikey/resources"),
             timeout=Duration.seconds(LAMBDA_TIMEOUT_SECONDS),
+            environment={
+                "METRIC_NAMESPACE": metric_namespace,
+            },
         )
 
         # Official AWS CDK Python API v2 reference:
@@ -89,7 +106,10 @@ class KartikeyStack(Stack):
         schedule_rule = events.Rule(
             self,
             "WebHealthSchedule",
-            description="Runs the website crawler every five minutes",
+            description=(
+                f"Runs the website crawler every "
+                f"{SCHEDULE_MINUTES} minutes"
+            ),
             schedule=events.Schedule.rate(
                 Duration.minutes(SCHEDULE_MINUTES)
             ),
@@ -108,7 +128,7 @@ class KartikeyStack(Stack):
         alarm_table = dynamodb.Table(
             self,
             "AlarmLogTable",
-            table_name=ALARM_TABLE_NAME,
+            table_name=f"{ALARM_TABLE_NAME}{suffix}",
             partition_key=dynamodb.Attribute(
                 name="alarm_id",
                 type=dynamodb.AttributeType.STRING,
@@ -125,7 +145,7 @@ class KartikeyStack(Stack):
         alarm_logger_function = lambda_.Function(
             self,
             "AlarmLoggerFunction",
-            function_name=ALARM_LOGGER_FUNCTION_NAME,
+            function_name=f"{ALARM_LOGGER_FUNCTION_NAME}{suffix}",
             description=ALARM_LOGGER_DESCRIPTION,
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="alarmLogger.handler",
@@ -138,7 +158,7 @@ class KartikeyStack(Stack):
             },
         )
 
-        # Official AWS CDK Python API v2 reference:
+        # Allow this logger to write to its own environment's table.
         # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html
         alarm_table.grant_write_data(alarm_logger_function)
 
@@ -147,11 +167,14 @@ class KartikeyStack(Stack):
         alarm_topic = sns.Topic(
             self,
             "WebsiteAlarmTopic",
-            topic_name=ALARM_TOPIC_NAME,
-            display_name="Kartikey Website Health Alarms",
+            topic_name=f"{ALARM_TOPIC_NAME}{suffix}",
+            display_name=(
+                f"Kartikey Website Health Alarms"
+                f"{f' - {environment_name}' if environment_name else ''}"
+            ),
         )
 
-        # Official AWS CDK Python API v2 reference:
+        # Send alarm notifications to the DynamoDB logger.
         # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns_subscriptions/LambdaSubscription.html
         alarm_topic.add_subscription(
             sns_subscriptions.LambdaSubscription(
@@ -164,7 +187,7 @@ class KartikeyStack(Stack):
         dashboard = cloudwatch.Dashboard(
             self,
             "WebsiteHealthDashboard",
-            dashboard_name=DASHBOARD_NAME,
+            dashboard_name=f"{DASHBOARD_NAME}{suffix}",
         )
 
         availability_metrics = []
@@ -174,10 +197,10 @@ class KartikeyStack(Stack):
             website_name = website["name"]
             construct_name = website_name.replace(" ", "")
 
-            # Official AWS CDK Python API v2 reference:
+            # Read metrics from this environment's namespace.
             # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Metric.html
             availability_metric = cloudwatch.Metric(
-                namespace=METRIC_NAMESPACE,
+                namespace=metric_namespace,
                 metric_name=AVAILABILITY_METRIC_NAME,
                 dimensions_map={
                     WEBSITE_DIMENSION_NAME: website_name,
@@ -188,7 +211,7 @@ class KartikeyStack(Stack):
             )
 
             latency_metric = cloudwatch.Metric(
-                namespace=METRIC_NAMESPACE,
+                namespace=metric_namespace,
                 metric_name=LATENCY_METRIC_NAME,
                 dimensions_map={
                     WEBSITE_DIMENSION_NAME: website_name,
@@ -207,7 +230,7 @@ class KartikeyStack(Stack):
                 self,
                 f"{construct_name}AvailabilityAlarm",
                 alarm_name=(
-                    f"{website_name}-Availability-Alarm"
+                    f"{website_name}-Availability-Alarm{suffix}"
                 ),
                 alarm_description=(
                     f"Alarm when {website_name} is unavailable"
@@ -227,7 +250,9 @@ class KartikeyStack(Stack):
             latency_alarm = cloudwatch.Alarm(
                 self,
                 f"{construct_name}LatencyAlarm",
-                alarm_name=f"{website_name}-Latency-Alarm",
+                alarm_name=(
+                    f"{website_name}-Latency-Alarm{suffix}"
+                ),
                 alarm_description=(
                     f"Alarm when {website_name} latency exceeds "
                     f"{LATENCY_THRESHOLD_MS} milliseconds"
@@ -244,7 +269,7 @@ class KartikeyStack(Stack):
                 ),
             )
 
-            # Official AWS CDK Python API v2 reference:
+            # Notify this environment's SNS topic.
             # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch_actions/SnsAction.html
             availability_alarm.add_alarm_action(
                 cloudwatch_actions.SnsAction(alarm_topic)
