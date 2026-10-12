@@ -43,3 +43,6 @@ ALARM_LOGGER_DESCRIPTION = (
     "Receives CloudWatch alarm notifications and stores them in DynamoDB"
 )
 ALARM_LOGGER_TIMEOUT_SECONDS = 30
+
+# Dynamo constant
+TARGET_TABLE_NAME = "Kartikey-Website-Targets"

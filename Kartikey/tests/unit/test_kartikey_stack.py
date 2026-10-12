@@ -71,27 +71,62 @@ def test_alarm_table_schema(beta_template):
         "AWS::DynamoDB::Table"
     )
 
-    assert len(tables) == 1
+    assert len(tables) == 2
 
-    table = next(iter(tables.values()))
-    properties = table["Properties"]
+    alarm_tables = [
+        resource["Properties"]
+        for resource in tables.values()
+        if resource["Properties"].get("TableName")
+        == "Kartikey-Website-Alarm-Logs-beta"
+    ]
 
-    assert properties["TableName"] == (
-        "Kartikey-Website-Alarm-Logs-beta"
-    )
+    assert len(alarm_tables) == 1
 
-    key_schema = properties["KeySchema"]
+    alarm_table = alarm_tables[0]
+
+    assert alarm_table["BillingMode"] == "PAY_PER_REQUEST"
 
     assert {
         "AttributeName": "alarm_id",
         "KeyType": "HASH",
-    } in key_schema
+    } in alarm_table["KeySchema"]
 
     assert {
         "AttributeName": "timestamp",
         "KeyType": "RANGE",
-    } in key_schema
+    } in alarm_table["KeySchema"]
 
+def test_target_table_schema(beta_template):
+    tables = beta_template.find_resources(
+        "AWS::DynamoDB::Table"
+    )
+
+    target_tables = [
+        resource["Properties"]
+        for resource in tables.values()
+        if resource["Properties"].get("TableName")
+        == "Kartikey-Website-Targets-beta"
+    ]
+
+    assert len(target_tables) == 1
+
+    target_table = target_tables[0]
+
+    assert target_table["BillingMode"] == "PAY_PER_REQUEST"
+
+    assert target_table["KeySchema"] == [
+        {
+            "AttributeName": "target_id",
+            "KeyType": "HASH",
+        }
+    ]
+
+    assert target_table["AttributeDefinitions"] == [
+        {
+            "AttributeName": "target_id",
+            "AttributeType": "S",
+        }
+    ]
 
 def test_logger_uses_correct_table(beta_template):
     functions = beta_template.find_resources(
