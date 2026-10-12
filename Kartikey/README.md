@@ -1,307 +1,310 @@
-# COMP2029 DevOps Project
+# COMP2029 DevOps — Website Health Monitor
 
 ## Student
 
 **Name:** Kartikey Sachdeva  
-**Project:** AWS infrastructure using the AWS Cloud Development Kit (CDK)  
+**Student ID:** 22122045  
 **Language:** Python  
+**Infrastructure:** AWS Cloud Development Kit (CDK v2)  
+**AWS Account:** `715054189400`  
 **AWS Region:** `us-east-1`
 
 ## Project Overview
 
-This repository contains my practical work for COMP2029 DevOps. The project uses AWS CDK with Python to define and deploy an automated website-health monitoring system.
+This project uses AWS CDK with Python to deploy an automated website
+health monitor for Western Sydney University, AWS and GitHub.
 
-The solution monitors Western Sydney University, AWS and GitHub. It publishes availability and latency metrics to Amazon CloudWatch, displays the results on a dashboard, generates alarms, publishes alarm notifications through Amazon SNS and stores alarm events in Amazon DynamoDB.
+The monitor checks website availability and response time, publishes
+CloudWatch metrics, displays a dashboard and generates alarms.
+Alarm notifications pass through SNS to a logging Lambda, which
+stores the events in DynamoDB.
 
-## Project Architecture
+A CDK pipeline deploys separate Beta and Prod copies of the application.
+Beta is deployed first. Manual approval is required before Prod.
 
-```text
-EventBridge schedule
-        |
-        v
-Website-monitoring Lambda
-        |
-        v
-CloudWatch metrics
-        |
-        +----> CloudWatch dashboard
-        |
-        +----> CloudWatch alarms
-                       |
-                       v
-                   SNS topic
-                       |
-                       v
-              Alarm-logger Lambda
-                       |
-                       v
-                DynamoDB table
+## Architecture
+
+### Monitoring
+
+1. EventBridge invokes the monitoring Lambda every five minutes.
+2. The Lambda reads the websites from `websites.json`.
+3. It checks each website and publishes Availability and Latency metrics.
+4. CloudWatch displays the metrics and evaluates website alarms.
+5. When an alarm enters ALARM, CloudWatch publishes a notification to SNS.
+6. SNS invokes the alarm logger.
+7. The logger stores the alarm details in DynamoDB.
+
+### Deployment
+
+1. Source retrieves the GitHub repository's `main` branch.
+2. Synth installs dependencies, checks Python syntax and synthesises CDK.
+3. SelfMutate updates the pipeline definition when required.
+4. Assets publishes the Lambda code packages.
+5. Beta deploys the test environment.
+6. ApproveProd pauses execution for review.
+7. Prod deploys after manual approval.
+
+## Project Files
+
+| File | Purpose |
+|---|---|
+| `app.py` | Creates the original monitoring stack and pipeline stack |
+| `kartikey/kartikey_stack.py` | Defines monitoring infrastructure and environment-specific names |
+| `kartikey/pipeline_stack.py` | Defines application stages, pipeline and Prod approval |
+| `kartikey/resources/webHealth.py` | Checks websites and publishes metrics |
+| `kartikey/resources/alarmLogger.py` | Processes SNS alarm messages and writes DynamoDB records |
+| `kartikey/resources/constants.py` | Stores shared configuration |
+| `kartikey/resources/websites.json` | Lists monitored websites |
+| `kartikey/resources/CWPutData.py` | Existing CloudWatch metric helper file |
+| `cdk.json` | Configures the CDK application |
+| `requirements.txt` | Lists runtime CDK dependencies |
+| `requirements-dev.txt` | Lists development dependencies |
+| `README.md` | Explains functionality, setup and verification |
+| `RUNBOOK.md` | Provides operational and troubleshooting instructions |
+
+## Monitored Websites
+
+| Website | URL |
+|---|---|
+| Western Sydney University | https://www.westernsydney.edu.au/ |
+| AWS | https://aws.amazon.com/ |
+| GitHub | https://github.com/ |
+
+## Monitoring Configuration
+
+| Setting | Value |
+|---|---|
+| Schedule | Every five minutes |
+| Lambda runtime | Python 3.13 |
+| Monitoring Lambda timeout | 60 seconds |
+| Website request timeout | 10 seconds |
+| Logger Lambda timeout | 30 seconds |
+| Metric period | Five minutes |
+| Availability alarm | Minimum availability below 1 |
+| Latency alarm | Average latency above 3000 ms |
+| Evaluation periods | 1 |
+| Missing data | Treated as breaching |
+| DynamoDB billing | PAY_PER_REQUEST |
+
+Successful checks record availability as `1`; failed checks record `0`.
+Latency is measured in milliseconds.
+
+Each deployment has six alarms: one availability alarm and one latency
+alarm for each website.
+
+## Beta and Prod Separation
+
+Both environments use the same account and region. They have separate
+resources and metric namespaces, although they share the same AWS
+account permissions and billing boundary.
+
+| Resource | Beta | Prod |
+|---|---|---|
+| Monitoring Lambda | `kartikey-web-health-beta` | `kartikey-web-health-prod` |
+| Logger Lambda | `kartikey-alarm-logger-beta` | `kartikey-alarm-logger-prod` |
+| Metric namespace | `Kartikey/WebsiteMonitoring/Beta` | `Kartikey/WebsiteMonitoring/Prod` |
+| Dashboard | `Kartikey-Website-Health-Dashboard-beta` | `Kartikey-Website-Health-Dashboard-prod` |
+| SNS topic | `kartikey-website-alarm-notifications-beta` | `kartikey-website-alarm-notifications-prod` |
+| DynamoDB table | `Kartikey-Website-Alarm-Logs-beta` | `Kartikey-Website-Alarm-Logs-prod` |
+| Alarm suffix | `-beta` | `-prod` |
+
+`KartikeyStack` remains the original deployment with its original names
+and namespace `Kartikey/WebsiteMonitoring`.
+
+The monitoring Lambda reads its namespace from the `METRIC_NAMESPACE`
+environment variable. The stack uses the same namespace for its
+dashboard and alarms.
+
+## DynamoDB Alarm Records
+
+| Attribute | Purpose |
+|---|---|
+| `alarm_id` | Unique event identifier and partition key |
+| `timestamp` | Event timestamp and sort key |
+| `alarm_name` | CloudWatch alarm name |
+| `new_state` | Reported alarm state |
+| `reason` | Explanation of the state change |
+
+The logger receives write permissions for its environment's table.
+
+## Setup
+
+### Prerequisites
+
+Install Python, Node.js, Git, AWS CLI and the AWS CDK CLI.
+Configure AWS credentials for the project account.
+
+```powershell
+npm install -g aws-cdk
 ```
 
-## Project Structure
+The pipeline expects an existing Secrets Manager secret named
+`github-token` in `us-east-1`, containing the GitHub authentication token.
+Do not commit tokens or AWS credentials.
 
-```text
-Kartikey/
-|-- kartikey/
-|   |-- resources/
-|   |   |-- alarmLogger.py
-|   |   |-- constants.py
-|   |   |-- CWPutData.py
-|   |   |-- webHealth.py
-|   |   `-- websites.json
-|   |-- __init__.py
-|   `-- kartikey_stack.py
-|-- tests/
-|   `-- unit/
-|-- .gitignore
-|-- app.py
-|-- cdk.json
-|-- README.md
-|-- RUNBOOK.md
-|-- requirements.txt
-`-- requirements-dev.txt
-```
-
-- `app.py` creates the CDK application and loads the stack.
-- `kartikey/kartikey_stack.py` defines the AWS infrastructure.
-- `webHealth.py` checks the configured websites and publishes metrics.
-- `alarmLogger.py` receives SNS messages and stores alarm events.
-- `constants.py` stores reusable project configuration.
-- `websites.json` contains the monitored website list.
-- `RUNBOOK.md` provides operational and troubleshooting instructions.
-
-## Setup Instructions
-
-### 1. Clone the repository
+### Clone and Install
 
 ```powershell
 git clone https://github.com/Kartikeysachdeva-github/WSU2026.git
 cd WSU2026\Kartikey
-```
-
-### 2. Activate the virtual environment
-
-```powershell
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-### 3. Install the dependencies
-
-```powershell
 python -m pip install -r requirements.txt
 ```
 
-### 4. Verify the AWS identity
+### Verify the Account
 
 ```powershell
 aws sts get-caller-identity
 ```
 
-### 5. Synthesise the CloudFormation template
+Confirm the account is `715054189400`.
+
+### Bootstrap
+
+The project account and region have already been bootstrapped.
+For a fresh setup:
 
 ```powershell
-cdk synth
+cdk bootstrap aws://715054189400/us-east-1
 ```
 
-### 6. Review infrastructure changes
+### Check and Deploy the Pipeline
+
+Commit and push the application code before initial deployment so the
+pipeline can retrieve it from GitHub.
 
 ```powershell
-cdk diff
+python -m py_compile .\app.py .\kartikey\pipeline_stack.py .\kartikey\kartikey_stack.py
+cdk synth KartikeyPipelineStack --quiet
+cdk diff KartikeyPipelineStack
+cdk deploy KartikeyPipelineStack
 ```
 
-### 7. Deploy the project
+Pipeline name: `Kartikey-Website-Health-Pipeline`.
+
+The source polls `Kartikeysachdeva-github/WSU2026` on branch `main`.
+The build enters the repository's `Kartikey/` folder and publishes
+`Kartikey/cdk.out` as its cloud assembly.
+
+Check Beta before approving Prod in the CodePipeline console.
+
+### Deploy the Original Monitor Separately
 
 ```powershell
-cdk deploy
+cdk synth KartikeyStack --quiet
+cdk diff KartikeyStack
+cdk deploy KartikeyStack
 ```
 
-## Useful CDK Commands
+## Development Progress
+
+| Week | Work completed |
+|---|---|
+| 1 | Development environment, repository, Python CDK app and synthesis |
+| 2 | Lambda website checks and CloudWatch metrics |
+| 3 | Multi-website checks, EventBridge schedule, dashboard and alarms |
+| 4–5 | Monitoring review, documentation and backlog work |
+| 6 | SNS notifications, logger Lambda and DynamoDB alarm storage |
+| 7 | Consolidation and checklist review |
+| 8 | No additional practical implementation |
+| 9 | CDK pipeline, separate Beta/Prod deployments and manual approval |
+
+## Testing and Verification
+
+### Week 6
+
+The original GitHub availability alarm was temporarily changed from
+OK to ALARM with the reason
+`Week 6 end-to-end SNS and DynamoDB test`.
+
+The resulting DynamoDB record verified the alarm notification path
+through SNS and the logger Lambda.
+
+### Week 9 — 12 October 2026
+
+| Check | Observed result |
+|---|---|
+| Python syntax and local synthesis | Passed |
+| Pipeline stack deployment | Successful |
+| Source, Synth, SelfMutate and Assets | All succeeded |
+| Beta deployment | Succeeded |
+| Beta Lambda invocation | All three websites returned HTTP 200 and availability 1 |
+| Beta metric publication | GitHub Availability datapoint was 1 |
+| Beta alarm recovery | GitHub availability alarm returned to OK |
+| Beta alarm logging | Five startup alarm records found |
+| Approval gate | Paused before Prod and continued after approval |
+| Prod deployment | Succeeded |
+| Prod Lambda invocation | All three websites returned HTTP 200 and availability 1 |
+| Prod alarm logging | Three startup alarm records found |
+
+Observed response times from the manual Prod invocation:
+
+| Website | Latency |
+|---|---:|
+| Western Sydney University | 573.22 ms |
+| AWS | 105.19 ms |
+| GitHub | 54.53 ms |
+
+These are individual measurements, not long-term performance guarantees.
+
+See `RUNBOOK.md` for repeatable verification commands.
+
+## Quality and Known Limitations
+
+- One reusable infrastructure definition supports Beta and Prod.
+- Separate names and namespaces prevent their monitoring data from mixing.
+- GitHub provides version history for code and infrastructure changes.
+- Manual approval provides a review point before Prod deployment.
+- The pipeline checks Python syntax and CDK synthesis. Runtime checks
+  were performed manually; they are not automated pipeline tests.
+- Missing data is treated as breaching. Startup alarms occurred before
+  metrics arrived, and their logged reasons identified missing data.
+- The new SNS topics subscribe the logger Lambda. Original email
+  subscriptions do not automatically carry over to Beta and Prod.
+- Dependency ranges and the build's CDK CLI installation are not pinned
+  to exact versions.
+- The original, Beta and Prod monitors remain separate active deployments.
+- Removing the pipeline does not automatically remove application stacks.
+  Retained tables and log groups may also remain after stack deletion.
+
+## Useful Commands
 
 | Command | Purpose |
 |---|---|
-| `cdk ls` | Lists the stacks in the application |
-| `cdk synth` | Generates the CloudFormation template |
-| `cdk diff` | Previews infrastructure changes |
-| `cdk deploy` | Deploys the stack to AWS |
-| `cdk destroy` | Removes non-retained stack resources |
+| `cdk list` | Lists application stacks |
+| `cdk synth KartikeyPipelineStack --quiet` | Checks pipeline synthesis |
+| `cdk diff KartikeyPipelineStack` | Reviews pipeline changes |
+| `cdk deploy KartikeyPipelineStack` | Creates or updates the pipeline stack |
+| `cdk deploy KartikeyStack` | Deploys the original monitor |
 
-## Week 1: Development Environment and Project Setup
+## Official AWS CDK References
 
-The following tasks were completed:
-
-- Installed Python, Visual Studio Code and Node.js.
-- Installed and configured the AWS CLI.
-- Installed the AWS CDK CLI.
-- Forked and cloned the course repository.
-- Created the `Kartikey` project directory.
-- Initialised a Python CDK application.
-- Created and activated a Python virtual environment.
-- Installed the project dependencies.
-- Verified the application using `cdk synth`.
-- Configured `.gitignore` to exclude generated files.
-
-## Week 2: Lambda Website Monitoring
-
-An AWS Lambda function named `kartikey-web-health` was created using AWS CDK.
-
-The function:
-
-- Sends an HTTP request to the configured website.
-- Determines whether the website is available.
-- Measures latency in milliseconds.
-- Publishes `Availability` and `Latency` metrics.
-- Uses the `Kartikey/WebsiteMonitoring` namespace.
-
-A successful website check records availability as `1`. A failed check records availability as `0`.
-
-## Week 3: Automated Multi-Website Monitoring
-
-The Lambda function was extended into an automated multi-site crawler.
-
-The system now:
-
-- Reads website information from `websites.json`.
-- Checks Western Sydney University, AWS and GitHub.
-- Publishes separate metrics using the `Website` dimension.
-- Runs every five minutes through Amazon EventBridge.
-- Displays website health on a CloudWatch dashboard.
-- Creates availability and latency alarms for every website.
-
-### Monitored Websites
-
-| Website | URL |
+| Construct | Reference |
 |---|---|
-| Western Sydney University | `https://www.westernsydney.edu.au/` |
-| AWS | `https://aws.amazon.com/` |
-| GitHub | `https://github.com/` |
-
-### Monitoring Configuration
-
-| Setting | Value |
-|---|---|
-| AWS Region | `us-east-1` |
-| Schedule | Every five minutes |
-| Metric namespace | `Kartikey/WebsiteMonitoring` |
-| Availability threshold | Below `1` |
-| Latency threshold | Above `3000 ms` |
-| Evaluation periods | `1` |
-| Dashboard | `Kartikey-Website-Health-Dashboard` |
-
-Six CloudWatch alarms were created:
-
-- Three availability alarms
-- Three latency alarms
-
-## Week 4 and Week 5: Dashboard, Alarms and Documentation
-
-The project dashboard, alarms, README, runbook and GitHub Project board were completed and reviewed.
-
-The CloudWatch dashboard displays:
-
-- Availability data for all three websites
-- Latency data for all three websites
-
-Week 5 introduced no additional project task and was used to complete the existing backlog.
-
-## Week 6: SNS Notifications and DynamoDB Alarm Logging
-
-During Week 6, the monitoring system was extended so CloudWatch alarms can publish notifications and store alarm events.
-
-The following resources were added:
-
-- SNS topic: `kartikey-website-alarm-notifications`
-- Logging Lambda: `kartikey-alarm-logger`
-- DynamoDB table: `Kartikey-Website-Alarm-Logs`
-- SNS alarm actions for all six CloudWatch alarms
-- SNS subscription connecting the topic to the logging Lambda
-- IAM permission allowing the logging Lambda to write to DynamoDB
-
-### Alarm-Logging Process
-
-When a website alarm enters the `ALARM` state:
-
-1. CloudWatch publishes the alarm notification to SNS.
-2. SNS invokes `kartikey-alarm-logger`.
-3. The Lambda reads the alarm notification.
-4. The Lambda writes the alarm name, state, reason and timestamp to DynamoDB.
-
-### DynamoDB Schema
-
-| Attribute | Purpose |
-|---|---|
-| `alarm_id` | Unique partition key generated for each event |
-| `timestamp` | Sort key containing the event time |
-| `alarm_name` | Name of the CloudWatch alarm |
-| `new_state` | New state reported by CloudWatch |
-| `reason` | Reason for the state change |
-
-The table uses on-demand billing through `PAY_PER_REQUEST`.
-
-### Week 6 Deployment Verification
-
-The updated stack completed successfully:
-
-```text
-KartikeyStack: UPDATE_COMPLETE
-```
-
-The synthesised template contained:
-
-- DynamoDB table
-- SNS topic
-- Alarm-logger Lambda
-- SNS Lambda subscription
-- DynamoDB write permissions
-- SNS actions on all six alarms
-
-### Week 6 End-to-End Test
-
-`GitHub-Availability-Alarm` was temporarily changed from `OK` to `ALARM`.
-
-The resulting DynamoDB record contained:
-
-| Field | Result |
-|---|---|
-| Alarm | `GitHub-Availability-Alarm` |
-| State | `ALARM` |
-| Reason | `Week 6 end-to-end SNS and DynamoDB test` |
-| DynamoDB write | Successful |
-
-This verified the complete workflow:
-
-```text
-CloudWatch alarm -> SNS -> alarm-logger Lambda -> DynamoDB
-```
-
-## AWS CDK Code Source Map
-
-| Project code | Purpose | Official AWS CDK Python API v2 source |
-|---|---|---|
-| `lambda_.Function` | Creates both Lambda functions | [Lambda Function](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Function.html) |
-| `lambda_.Code.from_asset` | Packages the Lambda source files | [Lambda Code](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Code.html) |
-| `lambda_.Runtime.PYTHON_3_13` | Selects the Python runtime | [Lambda Runtime](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Runtime.html) |
-| `Duration.seconds` | Configures Lambda timeouts | [CDK Duration](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk/Duration.html) |
-| `iam.PolicyStatement` | Grants permission to publish metrics | [IAM PolicyStatement](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_iam/PolicyStatement.html) |
-| `events.Rule` | Creates the EventBridge schedule | [EventBridge Rule](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Rule.html) |
-| `events.Schedule.rate` | Runs the crawler every five minutes | [EventBridge Schedule](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Schedule.html) |
-| `targets.LambdaFunction` | Connects EventBridge to Lambda | [Lambda Event Target](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events_targets/LambdaFunction.html) |
-| `cloudwatch.Metric` | Represents each website metric | [CloudWatch Metric](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Metric.html) |
-| `cloudwatch.Dashboard` | Creates the health dashboard | [CloudWatch Dashboard](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Dashboard.html) |
-| `cloudwatch.GraphWidget` | Displays metrics on the dashboard | [CloudWatch GraphWidget](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/GraphWidget.html) |
-| `cloudwatch.Alarm` | Creates website-health alarms | [CloudWatch Alarm](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Alarm.html) |
-| `sns.Topic` | Creates the alarm notification topic | [SNS Topic](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns/Topic.html) |
-| `sns_subscriptions.LambdaSubscription` | Subscribes the logger Lambda to SNS | [Lambda Subscription](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns_subscriptions/LambdaSubscription.html) |
-| `cloudwatch_actions.SnsAction` | Connects each alarm to SNS | [SNS Alarm Action](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch_actions/SnsAction.html) |
-| `dynamodb.Table` | Creates the alarm-log table | [DynamoDB Table](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html) |
-| `dynamodb.Attribute` | Defines the table keys | [DynamoDB Attribute](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Attribute.html) |
-| `dynamodb.BillingMode` | Configures on-demand billing | [DynamoDB BillingMode](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/BillingMode.html) |
-
-## References
-
-- [AWS CDK Python API v2](https://docs.aws.amazon.com/cdk/api/v2/python/)
-- [AWS CDK Python Guide](https://docs.aws.amazon.com/cdk/v2/guide/work-with-cdk-python.html)
-- [AWS CDK Getting Started](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)
+| Lambda Function | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Function.html |
+| Lambda Code | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Code.html |
+| IAM PolicyStatement | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_iam/PolicyStatement.html |
+| EventBridge Rule | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Rule.html |
+| EventBridge Schedule | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Schedule.html |
+| Lambda Event Target | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events_targets/LambdaFunction.html |
+| CloudWatch Metric | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Metric.html |
+| CloudWatch Dashboard | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Dashboard.html |
+| CloudWatch GraphWidget | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/GraphWidget.html |
+| CloudWatch Alarm | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Alarm.html |
+| SNS Topic | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns/Topic.html |
+| Lambda Subscription | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns_subscriptions/LambdaSubscription.html |
+| SNS Alarm Action | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch_actions/SnsAction.html |
+| DynamoDB Table | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html |
+| CDK Stage | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk/Stage.html |
+| CDK CodePipeline | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/CodePipeline.html |
+| CodePipelineSource | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/CodePipelineSource.html |
+| ShellStep | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/ShellStep.html |
+| ManualApprovalStep | https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/ManualApprovalStep.html |
 
 ## Generative AI Acknowledgement
 
-ChatGPT was used to explain concepts, troubleshoot the development environment and improve documentation. All commands and CDK constructs were reviewed against the official AWS CDK documentation.
+ChatGPT assisted with explanations, CDK code drafts, troubleshooting
+and documentation. I applied the changes, ran the commands and reviewed
+the deployment and runtime results. Official AWS CDK references are
+included alongside the implementation.

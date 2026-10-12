@@ -1,251 +1,340 @@
-# Website Monitoring Runbook
+# Website Health Monitor Runbook
 
 ## Purpose
 
-This runbook explains how to verify and troubleshoot the automated website-monitoring and alarm-logging system.
+This runbook explains how to operate and troubleshoot the original
+monitor and the separate Beta and Prod deployments.
 
-## System Components
+## Account and Region
 
-| Component | Name |
-|---|---|
-| Website-monitoring Lambda | `kartikey-web-health` |
-| Alarm-logging Lambda | `kartikey-alarm-logger` |
-| AWS Region | `us-east-1` |
-| CloudWatch namespace | `Kartikey/WebsiteMonitoring` |
-| CloudWatch dashboard | `Kartikey-Website-Health-Dashboard` |
-| EventBridge schedule | Every five minutes |
-| SNS topic | `kartikey-website-alarm-notifications` |
-| DynamoDB table | `Kartikey-Website-Alarm-Logs` |
-| Monitored websites | Western Sydney University, AWS and GitHub |
+- Account: `715054189400`
+- Region: `us-east-1`
+- Pipeline: `Kartikey-Website-Health-Pipeline`
 
-## Verify the AWS Account
+Before running commands:
 
 ```powershell
 aws sts get-caller-identity
 ```
 
-The deployed project currently belongs to AWS account:
+Confirm the account matches the project account.
 
-```text
-715054189400
-```
+## Select a Deployment
 
-Confirm this account before checking resources or deploying changes.
+Run commands from the repository's `Kartikey` project folder.
 
-## Check the Website-Monitoring Lambda
+Set the deployment to `beta`, `prod` or `original`:
 
 ```powershell
-aws lambda get-function --function-name kartikey-web-health --region us-east-1
+$monitorDeployment = "beta"
+
+switch ($monitorDeployment) {
+    "beta" {
+        $monitorSuffix = "-beta"
+        $monitorNamespace = "Kartikey/WebsiteMonitoring/Beta"
+    }
+    "prod" {
+        $monitorSuffix = "-prod"
+        $monitorNamespace = "Kartikey/WebsiteMonitoring/Prod"
+    }
+    "original" {
+        $monitorSuffix = ""
+        $monitorNamespace = "Kartikey/WebsiteMonitoring"
+    }
+    default {
+        throw "Choose beta, prod or original."
+    }
+}
+
+$monitorFunction = "kartikey-web-health$monitorSuffix"
+$monitorLogger = "kartikey-alarm-logger$monitorSuffix"
+$monitorTable = "Kartikey-Website-Alarm-Logs$monitorSuffix"
+$monitorDashboard = "Kartikey-Website-Health-Dashboard$monitorSuffix"
+$monitorTopic = "arn:aws:sns:us-east-1:715054189400:kartikey-website-alarm-notifications$monitorSuffix"
+$monitorAlarm = "GitHub-Availability-Alarm$monitorSuffix"
 ```
 
-## Manually Invoke the Website Crawler
+Rerun this block when switching deployments.
+
+## Check the Monitoring Lambda
 
 ```powershell
-aws lambda invoke --function-name kartikey-web-health --region us-east-1 "$env:TEMP\kartikey-test.json"
+aws lambda get-function-configuration --function-name $monitorFunction --region us-east-1 --query "{State:State,LastUpdateStatus:LastUpdateStatus,Namespace:Environment.Variables.METRIC_NAMESPACE}" --output json --no-cli-pager
 ```
 
-View the result:
+Expect State `Active`, LastUpdateStatus `Successful` and the selected
+namespace. The older original deployment may use the namespace fallback
+in code until its updated stack is deployed.
+
+## Invoke the Monitor
 
 ```powershell
-Get-Content "$env:TEMP\kartikey-test.json"
+aws lambda invoke --function-name $monitorFunction --region us-east-1 --cli-binary-format raw-in-base64-out --payload '{}' "$env:TEMP\kartikey-$monitorDeployment-response.json" --no-cli-pager
+
+Get-Content "$env:TEMP\kartikey-$monitorDeployment-response.json"
 ```
 
-A healthy website should report:
+Check both the invocation metadata and response body.
+An invocation StatusCode of 200 alone does not prove successful
+application execution; inspect FunctionError and the website results.
 
-- HTTP status `200`
-- Availability `1`
-- Latency below the configured threshold
+For the verified healthy checks, each website returned HTTP 200,
+availability 1 and a latency measurement.
 
-## Check the EventBridge Schedule
+## Check the Schedule
 
 ```powershell
-aws events list-rules --region us-east-1 --query "Rules[?contains(Name, 'WebHealthSchedule')].[Name,State,ScheduleExpression]" --output table
+aws events list-rules --region us-east-1 --query "Rules[?contains(Name, 'WebHealthSchedule')].[Name,State,ScheduleExpression]" --output table --no-cli-pager
 ```
 
-The rule should be `ENABLED` and use `rate(5 minutes)`.
+The application rules should be ENABLED with `rate(5 minutes)`.
 
-## Check CloudWatch Metrics
+Use the EventBridge console to inspect the selected rule's target.
+Confirm it points to the monitoring Lambda for the selected deployment.
+
+## Check Metrics
+
+Discover metrics:
 
 ```powershell
-aws cloudwatch list-metrics --namespace "Kartikey/WebsiteMonitoring" --region us-east-1 --output table
+aws cloudwatch list-metrics --namespace $monitorNamespace --region us-east-1 --output json --no-cli-pager
 ```
 
-Each website should have:
+Expect Availability and Latency metrics with a Website dimension.
 
-- `Availability`
-- `Latency`
-- A `Website` dimension
+New metrics may take up to 15 minutes to appear in list-metrics.
+Query datapoints directly when discovery has not caught up:
+
+```powershell
+$monitorEnd = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$monitorStart = (Get-Date).ToUniversalTime().AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+aws cloudwatch get-metric-statistics --namespace $monitorNamespace --metric-name Availability --dimensions Name=Website,Value=GitHub --start-time $monitorStart --end-time $monitorEnd --period 300 --statistics Minimum --region us-east-1 --output json --no-cli-pager
+
+aws cloudwatch get-metric-statistics --namespace $monitorNamespace --metric-name Latency --dimensions Name=Website,Value=GitHub --start-time $monitorStart --end-time $monitorEnd --period 300 --statistics Average --region us-east-1 --output json --no-cli-pager
+```
+
+For other websites, replace GitHub with AWS or WesternSydneyUniversity.
+Refresh the start and end variables when repeating the checks later.
 
 ## Check the Dashboard
 
-Open Amazon CloudWatch in `us-east-1`, select **Dashboards**, and then open:
+In CloudWatch, select Dashboards and open the name stored in
+`$monitorDashboard`.
 
-```text
-Kartikey-Website-Health-Dashboard
-```
+Verify recent Availability and Latency data for all three websites.
+Check the region and graph time range if data appears missing.
 
-Verify that the availability and latency graphs contain recent data for all three websites.
-
-## Check the CloudWatch Alarms
+## Check Alarms
 
 ```powershell
-aws cloudwatch describe-alarms --region us-east-1 --query "MetricAlarms[].{Name:AlarmName,State:StateValue}" --output table
+aws cloudwatch describe-alarms --alarm-names $monitorAlarm --region us-east-1 --query "MetricAlarms[].{Name:AlarmName,State:StateValue,Reason:StateReason,ActionsEnabled:ActionsEnabled,Actions:AlarmActions,Metrics:Metrics}" --output json --no-cli-pager
 ```
 
-Alarm states:
+| State | Meaning |
+|---|---|
+| OK | Evaluated data is within the configured threshold |
+| ALARM | The alarm condition is met, including missing data treated as breaching |
+| INSUFFICIENT_DATA | The alarm cannot currently determine its state |
 
-- `OK`: The metric is within the threshold.
-- `ALARM`: The metric has breached the threshold.
-- `INSUFFICIENT_DATA`: CloudWatch does not have enough recent data.
+Read StateReason before concluding that a website is unavailable.
+The current configuration treats missing data as breaching, which
+caused startup alarms before metrics arrived.
 
-## Check the SNS Topic
+## Check SNS and the Logger
 
 ```powershell
-aws sns list-topics --region us-east-1
+aws sns list-subscriptions-by-topic --topic-arn $monitorTopic --region us-east-1 --output json --no-cli-pager
+
+aws lambda get-function-configuration --function-name $monitorLogger --region us-east-1 --query "{State:State,Table:Environment.Variables.ALARM_TABLE_NAME}" --output json --no-cli-pager
 ```
 
-Confirm that the output contains:
+Confirm the SNS topic has a Lambda subscription for the selected logger.
+Confirm ALARM_TABLE_NAME matches the selected DynamoDB table.
 
-```text
-kartikey-website-alarm-notifications
-```
+Email subscriptions must be configured and confirmed separately for
+each topic if email notifications are required.
 
-## Check the Alarm-Logging Lambda
+## Check DynamoDB Records
 
 ```powershell
-aws lambda get-function --function-name kartikey-alarm-logger --region us-east-1
+aws dynamodb scan --table-name $monitorTable --region us-east-1 --query "Items[].{Alarm:alarm_name.S,State:new_state.S,Reason:reason.S,Time:timestamp.S}" --output table --no-cli-pager
 ```
 
-## Check DynamoDB Alarm Records
+Records should contain the alarm name, new state, reason and timestamp.
+A scan is suitable for this small practical dataset; it is not a
+recommended access pattern for a large production table.
+
+## Controlled Alarm Delivery Test
+
+Use Beta for routine testing. Select Beta using the deployment block.
+
+First confirm the chosen alarm is OK. Then temporarily set it to ALARM:
 
 ```powershell
-aws dynamodb scan --region us-east-1 --table-name "Kartikey-Website-Alarm-Logs" --query "Items[].{Alarm:alarm_name.S,State:new_state.S,Reason:reason.S,Time:timestamp.S}" --output table --no-cli-pager
+aws cloudwatch set-alarm-state --alarm-name $monitorAlarm --state-value ALARM --state-reason "Controlled Beta alarm delivery test" --region us-east-1
 ```
 
-A correctly processed alarm should contain:
-
-- Alarm name
-- State
-- State-change reason
-- Timestamp
-
-## End-to-End Alarm Test
-
-Check that the selected alarm is currently `OK`:
+Check DynamoDB for a new record with that reason:
 
 ```powershell
-aws cloudwatch describe-alarms --region us-east-1 --query "MetricAlarms[].{Name:AlarmName,State:StateValue}" --output table
+aws dynamodb scan --table-name $monitorTable --region us-east-1 --query "Items[].{Alarm:alarm_name.S,State:new_state.S,Reason:reason.S,Time:timestamp.S}" --output table --no-cli-pager
 ```
 
-Temporarily change the GitHub availability alarm to `ALARM`:
+Delivery is asynchronous; repeat the read if the record has not arrived.
+
+CloudWatch recalculates the alarm state on subsequent evaluation.
+Confirm that it returns to its expected calculated state.
+
+This test verifies notification delivery and logging. It does not
+simulate a real website outage or test threshold evaluation.
+
+## Check the Pipeline
 
 ```powershell
-aws cloudwatch set-alarm-state --region us-east-1 --alarm-name "GitHub-Availability-Alarm" --state-value ALARM --state-reason "Week 6 end-to-end SNS and DynamoDB test"
+aws codepipeline get-pipeline-state --name Kartikey-Website-Health-Pipeline --region us-east-1 --query "stageStates[].{Stage:stageName,Actions:actionStates[].{Action:actionName,Status:latestExecution.status,Error:latestExecution.errorDetails.message}}" --output json --no-cli-pager
 ```
 
-Then check DynamoDB:
+Expected order:
 
-```powershell
-aws dynamodb scan --region us-east-1 --table-name "Kartikey-Website-Alarm-Logs" --query "Items[].{Alarm:alarm_name.S,State:new_state.S,Reason:reason.S,Time:timestamp.S}" --output table --no-cli-pager
-```
+1. Source
+2. Build
+3. UpdatePipeline
+4. Assets
+5. Beta
+6. Prod, beginning with ApproveProd
 
-The alarm should return to its normal calculated state after CloudWatch evaluates the next metric.
+Before approving Prod, inspect Beta's Lambda results, metric datapoints,
+alarm reasons and DynamoDB records.
 
-## Troubleshooting
+## Deploy Changes
 
-### Website availability is `0`
-
-1. Confirm the URL in `websites.json`.
-2. Open the website manually.
-3. Review the website-monitoring Lambda logs.
-4. Check whether the request timed out.
-5. Determine whether the website blocks automated requests.
-
-### A latency alarm is active
-
-1. Check the latest latency metric.
-2. Invoke the crawler again.
-3. Compare the results across multiple checks.
-4. Determine whether one website or every website is affected.
-5. Do not change the threshold until the cause is understood.
-
-### Metrics are missing
-
-1. Confirm that `kartikey-web-health` executed.
-2. Review its CloudWatch logs.
-3. Confirm that its role permits `cloudwatch:PutMetricData`.
-4. Verify the metric namespace and `Website` dimension.
-5. Allow several minutes for new metrics to appear.
-
-### The schedule is not running
-
-1. Confirm that the EventBridge rule is enabled.
-2. Confirm that its target is `kartikey-web-health`.
-3. Confirm that EventBridge can invoke the Lambda.
-4. Invoke the Lambda manually to separate code problems from scheduling problems.
-
-### SNS does not invoke the logger
-
-1. Confirm that the SNS topic exists in `us-east-1`.
-2. Confirm the topic has a Lambda subscription.
-3. Confirm that the endpoint is `kartikey-alarm-logger`.
-4. Check the logger Lambda’s CloudWatch logs.
-5. Confirm the CloudWatch alarm contains an SNS alarm action.
-
-### DynamoDB has no new record
-
-1. Confirm that the alarm entered `ALARM`.
-2. Check the SNS topic and Lambda subscription.
-3. Review the `kartikey-alarm-logger` logs.
-4. Confirm the Lambda environment contains `ALARM_TABLE_NAME`.
-5. Confirm the Lambda role has `dynamodb:PutItem` permission.
-6. Confirm the table name is `Kartikey-Website-Alarm-Logs`.
-
-### DynamoDB displays `Unknown`
-
-This can happen when a manually published SNS test message is not valid JSON. Real CloudWatch alarm messages use valid JSON and are parsed into the expected fields.
-
-Use the end-to-end CloudWatch alarm test to verify the correct format.
-
-## Deployment Commands
-
-Activate the virtual environment:
+Activate the environment and check the application:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+python -m py_compile .\app.py .\kartikey\pipeline_stack.py .\kartikey\kartikey_stack.py .\kartikey\resources\webHealth.py .\kartikey\resources\alarmLogger.py
+cdk synth KartikeyPipelineStack --quiet
+git status --short
 ```
 
-Check Python syntax:
+Commit only the intended files and push to main.
+The pipeline polls GitHub for new revisions and requires a fresh
+Prod approval for each execution that reaches the approval step.
+
+For initial creation or a deliberate local pipeline update:
 
 ```powershell
-python -m py_compile .\kartikey\kartikey_stack.py
-python -m py_compile .\kartikey\resources\alarmLogger.py
+cdk diff KartikeyPipelineStack
+cdk deploy KartikeyPipelineStack
 ```
 
-Synthesise, review and deploy:
+For the original monitor:
 
 ```powershell
-cdk synth
-cdk diff
-cdk deploy
+cdk diff KartikeyStack
+cdk deploy KartikeyStack
 ```
+
+## Troubleshooting
+
+### Source fails
+
+- Inspect the Source action's error.
+- Check repository access and the token's validity.
+- Confirm `github-token` exists in the correct account and region.
+- Never paste or commit the secret value.
+
+### Synth fails
+
+- Open the Synth CodeBuild logs.
+- Find the first failing command and its error.
+- Confirm the application is under `Kartikey/`.
+- Confirm dependencies install and local synthesis succeeds.
+- Confirm `Kartikey/cdk.out` is produced.
+
+### Application deployment fails
+
+- Open the failed action's CloudFormation events.
+- Identify the resource and its failure reason.
+- Check permissions, resource naming conflicts and bootstrap resources.
+- Correct the CDK code and push the change.
+
+### Website availability is 0
+
+- Check the URL in websites.json.
+- Review the monitoring Lambda logs.
+- Check timeouts, HTTP errors and blocked automated requests.
+- Compare multiple checks before concluding there is an outage.
+
+### Metrics are missing
+
+- Confirm the Lambda executed successfully.
+- Check its namespace and Website dimension.
+- Review logs and cloudwatch:PutMetricData permissions.
+- Query datapoints directly and allow for discovery delay.
+
+### Schedule does not invoke Lambda
+
+- Confirm the rule is enabled.
+- Inspect its target and Lambda invocation permission.
+- Invoke Lambda manually to distinguish code issues from schedule issues.
+
+### Alarm is active despite a healthy response
+
+- Read StateReason and inspect the evaluated metric period.
+- Check for missing data and allow evaluation to catch up.
+- Compare the actual datapoints against the threshold.
+
+### DynamoDB has no new record
+
+- Confirm an ALARM state transition occurred.
+- Check the alarm's SNS action and ActionsEnabled.
+- Check the topic's logger subscription.
+- Review logger logs, table configuration and write permissions.
+
+### Record contains Unknown
+
+A manually published message may not match CloudWatch's alarm JSON.
+Use the controlled CloudWatch alarm test to check the expected format.
+
+## Verified Results — 12 October 2026
+
+- Every action in the first pipeline execution succeeded.
+- Beta and Prod monitoring Lambdas were Active.
+- Both returned HTTP 200 and availability 1 for all three websites.
+- A GitHub Availability datapoint of 1 was verified in Beta.
+- Beta's GitHub availability alarm recovered to OK.
+- Startup alarm records were found in both environment tables.
+- Manual approval paused the pipeline before Prod deployment.
 
 ## Resource Removal
 
-To remove the stack-managed resources:
+The original stack can be removed with:
 
 ```powershell
-cdk destroy
+cdk destroy KartikeyStack
 ```
 
-Only run this command when the project is no longer required. The DynamoDB table uses a retain policy in the synthesised template and may remain after the stack is destroyed.
+The pipeline stack can be removed with:
 
-## AWS CDK References
+```powershell
+cdk destroy KartikeyPipelineStack
+```
 
-- [Lambda Function](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Function.html)
-- [CloudWatch Alarm](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Alarm.html)
-- [SNS Topic](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns/Topic.html)
-- [SNS Alarm Action](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch_actions/SnsAction.html)
-- [Lambda Subscription](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns_subscriptions/LambdaSubscription.html)
-- [DynamoDB Table](https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html)
+Run removal commands only when those resources are no longer needed.
 
+Removing the pipeline does not automatically remove Beta and Prod
+application stacks. Inspect their actual stack names in CloudFormation
+before planning separate cleanup.
+
+DynamoDB tables and Lambda log groups may remain because of retention
+policies. Check retained resources after stack removal.
+
+## References
+
+- https://docs.aws.amazon.com/cdk/api/v2/python/
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/CodePipeline.html
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/CodePipelineSource.html
+- https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.pipelines/ManualApprovalStep.html
+- https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_ListMetrics.html
