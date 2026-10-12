@@ -6,6 +6,7 @@ from aws_cdk import (
     Stack,
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cloudwatch_actions,
+    aws_codedeploy as codedeploy,
     aws_dynamodb as dynamodb,
     aws_events as events,
     aws_events_targets as targets,
@@ -51,12 +52,12 @@ class KartikeyStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Beta and Prod use separate resource names and metrics.
-        # An empty environment name keeps the original deployment names.
         suffix = (
             f"-{environment_name.lower()}"
             if environment_name
             else ""
         )
+
         metric_namespace = (
             f"{METRIC_NAMESPACE}/{environment_name}"
             if environment_name
@@ -74,8 +75,10 @@ class KartikeyStack(Stack):
         ) as websites_file:
             websites = json.load(websites_file)["websites"]
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Function.html
+        # ---------------------------------------------------------
+        # Website crawler Lambda
+        # ---------------------------------------------------------
+
         web_health_function = lambda_.Function(
             self,
             "WebHealthFunction",
@@ -90,8 +93,6 @@ class KartikeyStack(Stack):
             },
         )
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_iam/PolicyStatement.html
         web_health_function.add_to_role_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -100,9 +101,29 @@ class KartikeyStack(Stack):
             )
         )
 
-        # Official AWS CDK Python API v2 references:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Rule.html
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events/Schedule.html
+        # ---------------------------------------------------------
+        # Week 11 - Lambda Version and Alias
+        # ---------------------------------------------------------
+
+        # current_version creates an immutable Lambda version.
+        # CodeDeploy will manage traffic to this version through
+        # the live alias.
+        crawler_version = web_health_function.current_version
+
+        crawler_alias = lambda_.Alias(
+            self,
+            "CrawlerLiveAlias",
+            alias_name="live",
+            version=crawler_version,
+            description=(
+                "Live version of the website health crawler."
+            ),
+        )
+
+        # ---------------------------------------------------------
+        # EventBridge schedule
+        # ---------------------------------------------------------
+
         schedule_rule = events.Rule(
             self,
             "WebHealthSchedule",
@@ -115,16 +136,17 @@ class KartikeyStack(Stack):
             ),
         )
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_events_targets/LambdaFunction.html
+        # Invoke the live alias rather than $LATEST.
+        # This ensures scheduled traffic passes through the
+        # CodeDeploy-controlled alias.
         schedule_rule.add_target(
-            targets.LambdaFunction(web_health_function)
+            targets.LambdaFunction(crawler_alias)
         )
 
-        # Official AWS CDK Python API v2 references:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Attribute.html
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/BillingMode.html
+        # ---------------------------------------------------------
+        # DynamoDB alarm log
+        # ---------------------------------------------------------
+
         alarm_table = dynamodb.Table(
             self,
             "AlarmLogTable",
@@ -140,8 +162,10 @@ class KartikeyStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         )
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_lambda/Function.html
+        # ---------------------------------------------------------
+        # Alarm logger Lambda
+        # ---------------------------------------------------------
+
         alarm_logger_function = lambda_.Function(
             self,
             "AlarmLoggerFunction",
@@ -158,12 +182,12 @@ class KartikeyStack(Stack):
             },
         )
 
-        # Allow this logger to write to its own environment's table.
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_dynamodb/Table.html
         alarm_table.grant_write_data(alarm_logger_function)
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns/Topic.html
+        # ---------------------------------------------------------
+        # SNS alarm topic
+        # ---------------------------------------------------------
+
         alarm_topic = sns.Topic(
             self,
             "WebsiteAlarmTopic",
@@ -174,16 +198,16 @@ class KartikeyStack(Stack):
             ),
         )
 
-        # Send alarm notifications to the DynamoDB logger.
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_sns_subscriptions/LambdaSubscription.html
         alarm_topic.add_subscription(
             sns_subscriptions.LambdaSubscription(
                 alarm_logger_function
             )
         )
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Dashboard.html
+        # ---------------------------------------------------------
+        # CloudWatch dashboard
+        # ---------------------------------------------------------
+
         dashboard = cloudwatch.Dashboard(
             self,
             "WebsiteHealthDashboard",
@@ -193,19 +217,23 @@ class KartikeyStack(Stack):
         availability_metrics = []
         latency_metrics = []
 
+        # ---------------------------------------------------------
+        # Website health metrics and alarms
+        # ---------------------------------------------------------
+
         for website in websites:
             website_name = website["name"]
             construct_name = website_name.replace(" ", "")
 
-            # Read metrics from this environment's namespace.
-            # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Metric.html
             availability_metric = cloudwatch.Metric(
                 namespace=metric_namespace,
                 metric_name=AVAILABILITY_METRIC_NAME,
                 dimensions_map={
                     WEBSITE_DIMENSION_NAME: website_name,
                 },
-                period=Duration.minutes(METRIC_PERIOD_MINUTES),
+                period=Duration.minutes(
+                    METRIC_PERIOD_MINUTES
+                ),
                 statistic="Minimum",
                 label=website_name,
             )
@@ -216,24 +244,31 @@ class KartikeyStack(Stack):
                 dimensions_map={
                     WEBSITE_DIMENSION_NAME: website_name,
                 },
-                period=Duration.minutes(METRIC_PERIOD_MINUTES),
+                period=Duration.minutes(
+                    METRIC_PERIOD_MINUTES
+                ),
                 statistic="Average",
                 label=website_name,
             )
 
-            availability_metrics.append(availability_metric)
-            latency_metrics.append(latency_metric)
+            availability_metrics.append(
+                availability_metric
+            )
 
-            # Official AWS CDK Python API v2 reference:
-            # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/Alarm.html
+            latency_metrics.append(
+                latency_metric
+            )
+
             availability_alarm = cloudwatch.Alarm(
                 self,
                 f"{construct_name}AvailabilityAlarm",
                 alarm_name=(
-                    f"{website_name}-Availability-Alarm{suffix}"
+                    f"{website_name}-Availability-Alarm"
+                    f"{suffix}"
                 ),
                 alarm_description=(
-                    f"Alarm when {website_name} is unavailable"
+                    f"Alarm when {website_name} "
+                    f"is unavailable"
                 ),
                 metric=availability_metric,
                 threshold=AVAILABILITY_THRESHOLD,
@@ -251,11 +286,13 @@ class KartikeyStack(Stack):
                 self,
                 f"{construct_name}LatencyAlarm",
                 alarm_name=(
-                    f"{website_name}-Latency-Alarm{suffix}"
+                    f"{website_name}-Latency-Alarm"
+                    f"{suffix}"
                 ),
                 alarm_description=(
-                    f"Alarm when {website_name} latency exceeds "
-                    f"{LATENCY_THRESHOLD_MS} milliseconds"
+                    f"Alarm when {website_name} latency "
+                    f"exceeds {LATENCY_THRESHOLD_MS} "
+                    f"milliseconds"
                 ),
                 metric=latency_metric,
                 threshold=LATENCY_THRESHOLD_MS,
@@ -269,18 +306,19 @@ class KartikeyStack(Stack):
                 ),
             )
 
-            # Notify this environment's SNS topic.
-            # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch_actions/SnsAction.html
             availability_alarm.add_alarm_action(
-                cloudwatch_actions.SnsAction(alarm_topic)
+                cloudwatch_actions.SnsAction(
+                    alarm_topic
+                )
             )
 
             latency_alarm.add_alarm_action(
-                cloudwatch_actions.SnsAction(alarm_topic)
+                cloudwatch_actions.SnsAction(
+                    alarm_topic
+                )
             )
 
-        # Official AWS CDK Python API v2 reference:
-        # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_cloudwatch/GraphWidget.html
+        # Website health graphs.
         dashboard.add_widgets(
             cloudwatch.GraphWidget(
                 title="Website Availability",
@@ -290,6 +328,190 @@ class KartikeyStack(Stack):
             cloudwatch.GraphWidget(
                 title="Website Latency",
                 left=latency_metrics,
+                width=12,
+            ),
+        )
+
+        # ---------------------------------------------------------
+        # Week 11 - crawler operational monitoring
+        # ---------------------------------------------------------
+
+        invocation_metric = (
+            web_health_function.metric_invocations(
+                period=Duration.minutes(5),
+                statistic="Sum",
+            )
+        )
+
+        error_metric = (
+            web_health_function.metric_errors(
+                period=Duration.minutes(5),
+                statistic="Sum",
+            )
+        )
+
+        duration_metric = (
+            web_health_function.metric_duration(
+                period=Duration.minutes(5),
+                statistic="Average",
+            )
+        )
+
+        throttle_metric = (
+            web_health_function.metric_throttles(
+                period=Duration.minutes(5),
+                statistic="Sum",
+            )
+        )
+
+        # ---------------------------------------------------------
+        # Crawler operational alarms
+        # ---------------------------------------------------------
+
+        crawler_error_alarm = cloudwatch.Alarm(
+            self,
+            "CrawlerErrorAlarm",
+            alarm_name=(
+                f"Kartikey-Crawler-Errors{suffix}"
+            ),
+            alarm_description=(
+                "Alarm when the website crawler Lambda "
+                "reports errors."
+            ),
+            metric=error_metric,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=(
+                cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD
+            ),
+            treat_missing_data=(
+                cloudwatch.TreatMissingData.NOT_BREACHING
+            ),
+        )
+
+        crawler_duration_alarm = cloudwatch.Alarm(
+            self,
+            "CrawlerDurationAlarm",
+            alarm_name=(
+                f"Kartikey-Crawler-Duration{suffix}"
+            ),
+            alarm_description=(
+                "Alarm when average crawler execution "
+                "time exceeds 30 seconds."
+            ),
+            metric=duration_metric,
+            threshold=30000,
+            evaluation_periods=1,
+            comparison_operator=(
+                cloudwatch.ComparisonOperator
+                .GREATER_THAN_THRESHOLD
+            ),
+            treat_missing_data=(
+                cloudwatch.TreatMissingData.NOT_BREACHING
+            ),
+        )
+
+        crawler_throttle_alarm = cloudwatch.Alarm(
+            self,
+            "CrawlerThrottleAlarm",
+            alarm_name=(
+                f"Kartikey-Crawler-Throttles{suffix}"
+            ),
+            alarm_description=(
+                "Alarm when the crawler Lambda "
+                "is throttled."
+            ),
+            metric=throttle_metric,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=(
+                cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD
+            ),
+            treat_missing_data=(
+                cloudwatch.TreatMissingData.NOT_BREACHING
+            ),
+        )
+
+        # Send operational alarms through the same SNS path.
+        crawler_error_alarm.add_alarm_action(
+            cloudwatch_actions.SnsAction(
+                alarm_topic
+            )
+        )
+
+        crawler_duration_alarm.add_alarm_action(
+            cloudwatch_actions.SnsAction(
+                alarm_topic
+            )
+        )
+
+        crawler_throttle_alarm.add_alarm_action(
+            cloudwatch_actions.SnsAction(
+                alarm_topic
+            )
+        )
+
+        # ---------------------------------------------------------
+        # Week 11 - CodeDeploy canary deployment
+        # ---------------------------------------------------------
+
+        # CodeDeploy shifts 10% of traffic to the new version.
+        # If the deployment remains healthy for five minutes,
+        # the remaining traffic is shifted to the new version.
+        #
+        # If the error alarm enters ALARM or the deployment
+        # fails/stops, CodeDeploy automatically rolls the alias
+        # back to the previous Lambda version.
+        codedeploy.LambdaDeploymentGroup(
+            self,
+            "CrawlerDeploymentGroup",
+            alias=crawler_alias,
+            deployment_group_name=(
+                f"Kartikey-Crawler-Deployment{suffix}"
+            ),
+            deployment_config=(
+                codedeploy.LambdaDeploymentConfig
+                .CANARY_10_PERCENT_5_MINUTES
+            ),
+            alarms=[
+                crawler_error_alarm,
+            ],
+            auto_rollback=(
+                codedeploy.AutoRollbackConfig(
+                    deployment_in_alarm=True,
+                    failed_deployment=True,
+                    stopped_deployment=True,
+                )
+            ),
+        )
+
+        # ---------------------------------------------------------
+        # Operational dashboard widgets
+        # ---------------------------------------------------------
+
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Crawler Invocations and Errors",
+                left=[
+                    invocation_metric,
+                    error_metric,
+                ],
+                width=12,
+            ),
+            cloudwatch.GraphWidget(
+                title="Crawler Execution Duration",
+                left=[
+                    duration_metric,
+                ],
+                width=12,
+            ),
+            cloudwatch.GraphWidget(
+                title="Crawler Throttles",
+                left=[
+                    throttle_metric,
+                ],
                 width=12,
             ),
         )

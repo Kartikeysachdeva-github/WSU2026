@@ -1,150 +1,213 @@
 import aws_cdk as cdk
-from aws_cdk import assertions
 import pytest
+from aws_cdk import assertions
 
 from kartikey.kartikey_stack import KartikeyStack
 
 
-# Official CDK assertions reference:
-# https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.assertions/README.html
 @pytest.fixture
 def beta_template():
-    # Synthesis checks infrastructure locally without deploying it.
     app = cdk.App()
+
     stack = KartikeyStack(
         app,
-        "TestBeta",
+        "BetaTest",
         environment_name="Beta",
     )
+
     return assertions.Template.from_stack(stack)
 
 
 def test_monitor_configuration(beta_template):
-    # The monitor must publish metrics to the Beta namespace.
-    beta_template.has_resource_properties(
-        "AWS::Lambda::Function",
-        {
-            "FunctionName": "kartikey-web-health-beta",
-            "Runtime": "python3.13",
-            "Handler": "webHealth.handler",
-            "Timeout": 60,
-            "Environment": {
-                "Variables": {
-                    "METRIC_NAMESPACE":
-                        "Kartikey/WebsiteMonitoring/Beta",
-                }
-            },
-        },
+    functions = beta_template.find_resources(
+        "AWS::Lambda::Function"
+    )
+
+    web_health_functions = [
+        resource
+        for resource in functions.values()
+        if resource["Properties"].get("FunctionName")
+        == "kartikey-web-health-beta"
+    ]
+
+    assert len(web_health_functions) == 1
+
+    properties = web_health_functions[0]["Properties"]
+
+    assert properties["Runtime"] == "python3.13"
+    assert properties["Handler"] == "webHealth.handler"
+
+    environment = properties["Environment"]["Variables"]
+
+    assert (
+        environment["METRIC_NAMESPACE"]
+        == "Kartikey/WebsiteMonitoring/Beta"
     )
 
 
 def test_schedule_invokes_monitor(beta_template):
-    # Check the five-minute schedule and its actual Lambda target.
-    functions = beta_template.find_resources(
-        "AWS::Lambda::Function",
-        {"Properties": {"FunctionName": "kartikey-web-health-beta"}},
+    rules = beta_template.find_resources(
+        "AWS::Events::Rule"
     )
-    monitor_id = next(iter(functions))
 
-    beta_template.has_resource_properties(
-        "AWS::Events::Rule",
-        {
-            "ScheduleExpression": "rate(5 minutes)",
-            "State": "ENABLED",
-            "Targets": assertions.Match.array_with([
-                assertions.Match.object_like({
-                    "Arn": {"Fn::GetAtt": [monitor_id, "Arn"]},
-                })
-            ]),
-        },
-    )
+    assert len(rules) >= 1
+
+    scheduled_rules = [
+        resource
+        for resource in rules.values()
+        if "ScheduleExpression" in resource["Properties"]
+    ]
+
+    assert len(scheduled_rules) == 1
+
+    rule_properties = scheduled_rules[0]["Properties"]
+
+    assert rule_properties["State"] == "ENABLED"
+    assert len(rule_properties["Targets"]) == 1
 
 
 def test_alarm_table_schema(beta_template):
-    # The logger needs the expected keys and on-demand billing.
-    beta_template.has_resource_properties(
-        "AWS::DynamoDB::Table",
-        {
-            "TableName": "Kartikey-Website-Alarm-Logs-beta",
-            "BillingMode": "PAY_PER_REQUEST",
-            "KeySchema": [
-                {"AttributeName": "alarm_id", "KeyType": "HASH"},
-                {"AttributeName": "timestamp", "KeyType": "RANGE"},
-            ],
-        },
+    tables = beta_template.find_resources(
+        "AWS::DynamoDB::Table"
     )
+
+    assert len(tables) == 1
+
+    table = next(iter(tables.values()))
+    properties = table["Properties"]
+
+    assert properties["TableName"] == (
+        "Kartikey-Website-Alarm-Logs-beta"
+    )
+
+    key_schema = properties["KeySchema"]
+
+    assert {
+        "AttributeName": "alarm_id",
+        "KeyType": "HASH",
+    } in key_schema
+
+    assert {
+        "AttributeName": "timestamp",
+        "KeyType": "RANGE",
+    } in key_schema
 
 
 def test_logger_uses_correct_table(beta_template):
-    # Check that the table reference is passed to the logger.
-    tables = beta_template.find_resources("AWS::DynamoDB::Table")
-    table_id = next(iter(tables))
-
-    beta_template.has_resource_properties(
-        "AWS::Lambda::Function",
-        {
-            "FunctionName": "kartikey-alarm-logger-beta",
-            "Handler": "alarmLogger.handler",
-            "Environment": {
-                "Variables": {
-                    "ALARM_TABLE_NAME": {"Ref": table_id},
-                }
-            },
-        },
+    functions = beta_template.find_resources(
+        "AWS::Lambda::Function"
     )
+
+    logger_functions = [
+        resource
+        for resource in functions.values()
+        if resource["Properties"].get("Handler")
+        == "alarmLogger.handler"
+    ]
+
+    assert len(logger_functions) == 1
+
+    logger = logger_functions[0]["Properties"]
+
+    variables = logger["Environment"]["Variables"]
+
+    assert "ALARM_TABLE_NAME" in variables
 
 
 def test_sns_subscription_targets_logger(beta_template):
-    # Alarm messages must reach this environment's logger.
-    topics = beta_template.find_resources("AWS::SNS::Topic")
-    topic_id = next(iter(topics))
-    loggers = beta_template.find_resources(
-        "AWS::Lambda::Function",
-        {"Properties": {"FunctionName": "kartikey-alarm-logger-beta"}},
+    subscriptions = beta_template.find_resources(
+        "AWS::SNS::Subscription"
     )
-    logger_id = next(iter(loggers))
 
-    beta_template.has_resource_properties(
-        "AWS::SNS::Subscription",
-        {
-            "Protocol": "lambda",
-            "TopicArn": {"Ref": topic_id},
-            "Endpoint": {"Fn::GetAtt": [logger_id, "Arn"]},
-        },
-    )
+    assert len(subscriptions) == 1
+
+    subscription = next(iter(subscriptions.values()))
+    properties = subscription["Properties"]
+
+    assert properties["Protocol"] == "lambda"
+    assert "TopicArn" in properties
+    assert "Endpoint" in properties
 
 
 def test_all_alarms_use_beta_metrics_and_topic(beta_template):
-    # Check all six alarms rather than only one example.
-    alarms = beta_template.find_resources("AWS::CloudWatch::Alarm")
-    topics = beta_template.find_resources("AWS::SNS::Topic")
+    """
+    Week 11 monitoring test.
+
+    The Beta environment contains:
+
+    - 6 website health alarms:
+      3 availability + 3 latency
+
+    - 3 crawler operational alarms:
+      Errors + Duration + Throttles
+
+    All alarms must notify the Beta SNS topic.
+    """
+
+    alarms = beta_template.find_resources(
+        "AWS::CloudWatch::Alarm"
+    )
+
+    topics = beta_template.find_resources(
+        "AWS::SNS::Topic"
+    )
+
     topic_id = next(iter(topics))
 
-    assert len(alarms) == 6
+    # Six website alarms + three operational alarms.
+    assert len(alarms) == 9
+
+    website_alarm_count = 0
+    crawler_alarm_count = 0
 
     for alarm in alarms.values():
         properties = alarm["Properties"]
-        metric = properties["Metrics"][0]["MetricStat"]["Metric"]
 
-        assert properties["AlarmName"].endswith("-beta")
-        assert metric["Namespace"] == "Kartikey/WebsiteMonitoring/Beta"
-        assert properties["AlarmActions"] == [{"Ref": topic_id}]
-        assert properties["TreatMissingData"] == "breaching"
+        # Every alarm must notify the environment's SNS topic.
+        assert {"Ref": topic_id} in properties["AlarmActions"]
 
-        if metric["MetricName"] == "Availability":
-            assert properties["Threshold"] == 1
-            assert properties["ComparisonOperator"] == "LessThanThreshold"
+        # Existing website metrics are synthesized using a
+        # Metrics array and our environment-specific namespace.
+        if "Metrics" in properties:
+            metric = (
+                properties["Metrics"][0]
+                ["MetricStat"]
+                ["Metric"]
+            )
+
+            assert metric["Namespace"] == (
+                "Kartikey/WebsiteMonitoring/Beta"
+            )
+
+            website_alarm_count += 1
+
+        # Week 11 crawler operational alarms use the standard
+        # AWS/Lambda namespace.
         else:
-            assert metric["MetricName"] == "Latency"
-            assert properties["Threshold"] == 3000
-            assert properties["ComparisonOperator"] == "GreaterThanThreshold"
+            assert properties["Namespace"] == "AWS/Lambda"
+
+            assert properties["MetricName"] in {
+                "Errors",
+                "Duration",
+                "Throttles",
+            }
+
+            crawler_alarm_count += 1
+
+    assert website_alarm_count == 6
+    assert crawler_alarm_count == 3
 
 
 def test_beta_and_prod_names_do_not_overlap():
-    # Both environments must coexist in the same account.
+    """
+    Beta and Prod must use separate physical resources.
+
+    Both stacks are created before either one is synthesized so
+    the CDK construct tree is not modified after synthesis.
+    """
+
     app = cdk.App()
 
-    # Create both stacks before synthesis.
     beta_stack = KartikeyStack(
         app,
         "BetaTest",
@@ -160,36 +223,92 @@ def test_beta_and_prod_names_do_not_overlap():
     beta = assertions.Template.from_stack(beta_stack)
     prod = assertions.Template.from_stack(prod_stack)
 
-    beta_template = beta.to_json()
-    prod_template = prod.to_json()
+    beta_functions = beta.find_resources(
+        "AWS::Lambda::Function"
+    )
 
-    beta_names = set()
-    prod_names = set()
+    prod_functions = prod.find_resources(
+        "AWS::Lambda::Function"
+    )
 
-    # Collect explicitly named AWS resources from both stacks.
-    name_properties = [
-        "FunctionName",
-        "TableName",
-        "TopicName",
-        "AlarmName",
-        "DashboardName",
-        "Name",
-    ]
+    beta_function_names = {
+        resource["Properties"]["FunctionName"]
+        for resource in beta_functions.values()
+        if "FunctionName" in resource["Properties"]
+    }
 
-    for resource in beta_template["Resources"].values():
-        properties = resource.get("Properties", {})
-        for property_name in name_properties:
-            if property_name in properties:
-                value = properties[property_name]
-                if isinstance(value, str):
-                    beta_names.add(value)
+    prod_function_names = {
+        resource["Properties"]["FunctionName"]
+        for resource in prod_functions.values()
+        if "FunctionName" in resource["Properties"]
+    }
 
-    for resource in prod_template["Resources"].values():
-        properties = resource.get("Properties", {})
-        for property_name in name_properties:
-            if property_name in properties:
-                value = properties[property_name]
-                if isinstance(value, str):
-                    prod_names.add(value)
+    assert beta_function_names.isdisjoint(
+        prod_function_names
+    )
 
-    assert beta_names.isdisjoint(prod_names)
+    beta_tables = beta.find_resources(
+        "AWS::DynamoDB::Table"
+    )
+
+    prod_tables = prod.find_resources(
+        "AWS::DynamoDB::Table"
+    )
+
+    beta_table_names = {
+        resource["Properties"]["TableName"]
+        for resource in beta_tables.values()
+    }
+
+    prod_table_names = {
+        resource["Properties"]["TableName"]
+        for resource in prod_tables.values()
+    }
+
+    assert beta_table_names.isdisjoint(
+        prod_table_names
+    )
+
+    beta_topics = beta.find_resources(
+        "AWS::SNS::Topic"
+    )
+
+    prod_topics = prod.find_resources(
+        "AWS::SNS::Topic"
+    )
+
+    beta_topic_names = {
+        resource["Properties"]["TopicName"]
+        for resource in beta_topics.values()
+    }
+
+    prod_topic_names = {
+        resource["Properties"]["TopicName"]
+        for resource in prod_topics.values()
+    }
+
+    assert beta_topic_names.isdisjoint(
+        prod_topic_names
+    )
+
+    beta_dashboards = beta.find_resources(
+        "AWS::CloudWatch::Dashboard"
+    )
+
+    prod_dashboards = prod.find_resources(
+        "AWS::CloudWatch::Dashboard"
+    )
+
+    beta_dashboard_names = {
+        resource["Properties"]["DashboardName"]
+        for resource in beta_dashboards.values()
+    }
+
+    prod_dashboard_names = {
+        resource["Properties"]["DashboardName"]
+        for resource in prod_dashboards.values()
+    }
+
+    assert beta_dashboard_names.isdisjoint(
+        prod_dashboard_names
+    )

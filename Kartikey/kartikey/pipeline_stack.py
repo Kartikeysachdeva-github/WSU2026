@@ -14,6 +14,7 @@ from .kartikey_stack import KartikeyStack
 # Official AWS CDK Python API v2 reference:
 # https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk/Stage.html
 class WebsiteHealthStage(Stage):
+    
     """Deploy a separate copy of the website health monitor."""
 
     def __init__(
@@ -75,7 +76,9 @@ class KartikeyPipelineStack(Stack):
                     "cd Kartikey",
                     "npm install -g aws-cdk",
                     "python -m pip install -r requirements.txt",
+                    "python -m pip install -r requirements-dev.txt",
                     "python -m compileall -q app.py kartikey",
+                    "python -m pytest tests/unit tests/functional -v",
                     "cdk synth",
                 ],
                 primary_output_directory="Kartikey/cdk.out",
