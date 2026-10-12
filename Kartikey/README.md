@@ -1,4 +1,4 @@
-# COMP2029 DevOps — Website Health Monitor
+# COMP2029 DevOps - Website Health Monitor
 
 ## Student
 
@@ -12,279 +12,553 @@
 
 ## Project Overview
 
-This project implements an automated Website Health Monitoring system using
-Python, AWS and Infrastructure as Code (IaC).
+This project implements an automated Website Health Monitoring system using Python, AWS and Infrastructure as Code.
 
-The system monitors:
+The system originally monitored a fixed set of websites. The Applied Project extends the application with a public REST API that allows the crawler target list to be created, read, updated and deleted without changing or redeploying the crawler code.
 
-- Western Sydney University
-- Amazon Web Services (AWS)
-- GitHub
+Website targets are stored in Amazon DynamoDB. An EventBridge rule invokes the crawler every five minutes, and the crawler reads the current target list from DynamoDB before checking each website.
 
-Every five minutes, an AWS Lambda crawler checks the configured websites and
-publishes health information to Amazon CloudWatch.
+For every target, the crawler publishes availability and latency metrics to Amazon CloudWatch.
 
-The system monitors both website health and the operational health of the
-crawler itself. CloudWatch dashboards and alarms provide visibility into
-availability, latency, Lambda invocations, errors, execution duration and
-throttling.
+The system also monitors the operational health of the crawler itself using Lambda metrics including invocations, errors, execution duration and throttles.
 
-Alarm notifications are published through Amazon SNS. An alarm logger Lambda
-processes these notifications and stores alarm events in Amazon DynamoDB.
+CloudWatch alarms publish notifications through Amazon SNS. An alarm logger Lambda stores alarm events in a separate DynamoDB table.
 
-A CDK-based CI/CD pipeline automatically builds, tests and deploys the
-application through separate Beta and Prod environments. Production deployment
-requires manual approval.
-
-The release process also uses Lambda versions, a `live` alias and AWS CodeDeploy
-to perform a canary deployment. A new Lambda version initially receives 10% of
-traffic. If the monitored deployment remains healthy for five minutes,
-CodeDeploy completes the deployment. If the deployment fails or the configured
-CloudWatch error alarm enters ALARM, CodeDeploy can automatically roll the
-alias back to the previous Lambda version.
+The complete application is deployed through an AWS CDK CodePipeline with separate Beta and Prod environments, automated tests, manual production approval, Lambda versioning, CodeDeploy canary releases and automatic rollback.
 
 ---
 
-## Main DevOps Features
+## Applied Project Objectives
 
-The project demonstrates the following DevOps practices:
+The Applied Project extends the existing web crawler with:
 
-- Infrastructure as Code using AWS CDK
-- Source control using Git and GitHub
-- Automated CI/CD using AWS CodePipeline
-- Automated unit and functional testing
-- Pipeline-blocking automated tests
-- Separate Beta and Prod environments
-- Manual approval before production
-- Continuous operational monitoring
-- CloudWatch dashboards and alarms
-- SNS-based alarm notifications
-- DynamoDB alarm history
-- Lambda versioning and aliases
-- Canary deployment using AWS CodeDeploy
-- Automated rollback based on deployment health
-- Repeatable infrastructure deployment from source code
+- a public API Gateway REST API;
+- a DynamoDB target database;
+- CRUD operations for crawler targets;
+- a Lambda function containing the CRUD business logic;
+- DynamoDB read/write timing measurements;
+- runtime target loading by the crawler;
+- initial target seeding;
+- additional unit and functional tests;
+- a live integration test;
+- Beta and Prod deployment through the existing CI/CD pipeline.
+
+The important architectural change is that **DynamoDB is now the runtime source of truth for crawler targets**.
+
+`websites.json` remains as infrastructure configuration for the original website-specific CloudWatch alarms, but the crawler itself retrieves its active target list from DynamoDB.
 
 ---
 
-## Architecture
+# Architecture
 
-### Monitoring Flow
+## Application Architecture
 
 ```text
-EventBridge
-     |
-     v
-Lambda live Alias
-     |
-     v
-Website Health Crawler
-     |
-     +-------------------------+
-     |                         |
-     v                         v
-Website Requests          CloudWatch
-                               |
-                    +----------+----------+
-                    |                     |
-                    v                     v
-                 Metrics                Alarms
-                                          |
-                                          v
-                                         SNS
-                                          |
-                                          v
-                                  Alarm Logger Lambda
-                                          |
-                                          v
-                                      DynamoDB
+                         User
+                          |
+                          v
+                    API Gateway
+                          |
+                          v
+                   CRUD API Lambda
+                          |
+                    CRUD operations
+                          |
+                          v
+                  Targets DynamoDB
+                          ^
+                          |
+                          |
+EventBridge ------> Crawler Lambda
+ every 5 min        live alias
+                     |
+                     +------> Target Websites
+                     |
+                     +------> CloudWatch Metrics
+                                  |
+                           +------+------+
+                           |             |
+                       Dashboard       Alarms
+                                         |
+                                         v
+                                        SNS
+                                         |
+                                         v
+                                Alarm Logger Lambda
+                                         |
+                                         v
+                                Alarm Log DynamoDB
 ```
 
-### Monitoring Process
+### Runtime Monitoring Flow
 
-1. EventBridge invokes the monitoring Lambda through the `live` alias every
-   five minutes.
-2. The Lambda reads the monitored websites from `websites.json`.
-3. Each website is requested using the configured request timeout.
-4. The crawler calculates website availability and response latency.
-5. Custom Availability and Latency metrics are published to CloudWatch.
-6. AWS Lambda operational metrics are also monitored.
+1. EventBridge invokes the crawler through its `live` Lambda alias every five minutes.
+2. The crawler scans the environment-specific target DynamoDB table.
+3. The current website targets are loaded at runtime.
+4. The crawler sends an HTTP request to each target.
+5. Availability and latency are calculated.
+6. Custom metrics are published to CloudWatch.
 7. CloudWatch dashboards display website and crawler health.
-8. CloudWatch alarms evaluate the metrics.
-9. Alarm state changes are published to SNS.
+8. CloudWatch alarms evaluate the monitoring data.
+9. Alarm notifications are sent to SNS.
 10. SNS invokes the alarm logger Lambda.
-11. The alarm logger stores the event in DynamoDB.
+11. Alarm information is stored in the alarm-log DynamoDB table.
+
+Because the crawler reads DynamoDB during each invocation, CRUD changes can affect subsequent crawler runs without modifying the crawler source code.
 
 ---
 
-## CI/CD Release Flow
+# Target Management REST API
+
+The Applied Project provides a public REST interface through Amazon API Gateway.
+
+## Target Record
+
+A crawler target uses the following structure:
+
+```json
+{
+  "target_id": "github",
+  "name": "GitHub",
+  "url": "https://github.com/"
+}
+```
+
+`target_id` is the DynamoDB partition key.
+
+---
+
+## API Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/targets` | Create a target |
+| `GET` | `/targets` | List all targets |
+| `GET` | `/targets/{id}` | Retrieve one target |
+| `PUT` | `/targets/{id}` | Update a target |
+| `DELETE` | `/targets/{id}` | Delete a target |
+
+API Gateway uses Lambda proxy integration to forward requests to `targetApi.py`.
+
+---
+
+## Create Target
+
+### Request
+
+```http
+POST /targets
+Content-Type: application/json
+```
+
+```json
+{
+  "target_id": "example",
+  "name": "Example",
+  "url": "https://example.com"
+}
+```
+
+### Example Response
+
+```json
+{
+  "message": "Target created.",
+  "target": {
+    "target_id": "example",
+    "name": "Example",
+    "url": "https://example.com"
+  },
+  "operation_time_ms": 58.922
+}
+```
+
+A duplicate `target_id` is rejected rather than silently replacing an existing target.
+
+---
+
+## List Targets
+
+```http
+GET /targets
+```
+
+Example response:
+
+```json
+{
+  "targets": [
+    {
+      "target_id": "aws",
+      "name": "AWS",
+      "url": "https://aws.amazon.com/"
+    },
+    {
+      "target_id": "github",
+      "name": "GitHub",
+      "url": "https://github.com/"
+    }
+  ],
+  "count": 2,
+  "operation_time_ms": 301.149
+}
+```
+
+---
+
+## Get Target
+
+```http
+GET /targets/{id}
+```
+
+Example:
+
+```http
+GET /targets/github
+```
+
+A missing target returns HTTP `404`.
+
+---
+
+## Update Target
+
+```http
+PUT /targets/{id}
+Content-Type: application/json
+```
+
+Example request:
+
+```json
+{
+  "name": "Updated Example",
+  "url": "https://example.org"
+}
+```
+
+The update is persisted in DynamoDB and becomes available to subsequent crawler executions.
+
+---
+
+## Delete Target
+
+```http
+DELETE /targets/{id}
+```
+
+The target is removed from DynamoDB.
+
+A subsequent GET for the deleted ID returns HTTP `404`.
+
+---
+
+## API Status Codes
+
+| Status | Meaning |
+|---|---|
+| `200` | Successful read, update or delete |
+| `201` | Target successfully created |
+| `400` | Invalid request or target data |
+| `404` | Target does not exist |
+| `409` | Target already exists |
+| `500` | Unexpected server-side error |
+
+---
+
+# DynamoDB Operation Timing
+
+The CRUD Lambda records the duration of DynamoDB operations using `time.perf_counter()`.
+
+API responses include:
+
+```json
+"operation_time_ms": 58.922
+```
+
+The Lambda also publishes operation timing to CloudWatch using:
+
+- `DynamoDBReadTime`
+- `DynamoDBWriteTime`
+
+This allows database behaviour to be measured rather than only checking whether an operation succeeded.
+
+During live Beta testing, successful CRUD requests returned real read/write timing values.
+
+---
+
+# Initial Target Seeding
+
+A CloudFormation custom-resource Lambda seeds the original target list when a new environment is deployed.
+
+The initial targets are:
+
+| Target | URL |
+|---|---|
+| AWS | `https://aws.amazon.com/` |
+| WesternSydneyUniversity | `https://www.westernsydney.edu.au/` |
+| GitHub | `https://github.com/` |
+
+The seeder uses a conditional DynamoDB write so an existing target is not overwritten.
+
+This gives a newly deployed Beta or Prod environment an immediately usable target list while still allowing the list to be managed through the CRUD API afterward.
+
+---
+
+# Beta and Prod Environments
+
+Beta and Prod use separate application resources.
+
+| Resource | Beta | Prod |
+|---|---|---|
+| Crawler Lambda | `kartikey-web-health-beta` | `kartikey-web-health-prod` |
+| Target API Lambda | `kartikey-target-api-beta` | `kartikey-target-api-prod` |
+| Target table | `Kartikey-Website-Targets-beta` | `Kartikey-Website-Targets-prod` |
+| Alarm log table | `Kartikey-Website-Alarm-Logs-beta` | `Kartikey-Website-Alarm-Logs-prod` |
+| Metric namespace | `Kartikey/WebsiteMonitoring/Beta` | `Kartikey/WebsiteMonitoring/Prod` |
+| Dashboard | `Kartikey-Website-Health-Dashboard-beta` | `Kartikey-Website-Health-Dashboard-prod` |
+| CodeDeploy group | `Kartikey-Crawler-Deployment-beta` | `Kartikey-Crawler-Deployment-prod` |
+| Lambda alias | `live` | `live` |
+
+Separate resource names prevent Beta data from being mixed with production data.
+
+---
+
+# CI/CD Pipeline
+
+The deployment pipeline is:
 
 ```text
-Developer
-    |
-    v
 GitHub main
-    |
-    v
-AWS CodePipeline
-    |
-    v
+     |
+     v
 Source
-    |
-    v
+     |
+     v
 Build / Synth
-    |
-    +--> Install dependencies
-    +--> Check Python code
-    +--> Run automated tests
-    +--> CDK synth
-    |
-    v
+     |
+     +--> Install dependencies
+     +--> Compile/check Python
+     +--> Run unit tests
+     +--> Run functional tests
+     +--> CDK synth
+     |
+     v
 Self-Mutate / Assets
-    |
-    v
+     |
+     v
 Beta
-    |
-    v
+     |
+     v
 Manual Production Approval
-    |
-    v
+     |
+     v
 Prod
 ```
 
-The pipeline retrieves the `main` branch from GitHub.
+Pipeline name:
 
-During the build/synthesis stage, the pipeline installs both application and
-development dependencies and runs the unit and functional test suites.
+`Kartikey-Website-Health-Pipeline`
 
-If an automated test fails, the build fails and the release does not continue.
+Repository:
 
-Beta is deployed before Prod. Production deployment is protected by the
-`ApproveProd` manual approval step so that Beta can be reviewed before the
-production release continues.
+`Kartikeysachdeva-github/WSU2026`
+
+Branch:
+
+`main`
+
+A failed unit or functional test causes the CodeBuild stage to fail, preventing deployment.
+
+Production cannot proceed until the `ApproveProd` manual approval action is completed.
 
 ---
 
-## Canary Deployment and Automatic Rollback
+# Testing Strategy
 
-Week 11 adds a safer release mechanism for the website crawler.
+Testing is divided into three levels.
 
-Instead of EventBridge directly invoking the mutable Lambda function, it invokes
-a Lambda alias named:
+## Unit Tests
 
-`live`
+Unit tests verify isolated application logic and synthesized infrastructure.
 
-The alias references an immutable published Lambda version.
+Coverage includes:
 
-AWS CodeDeploy manages changes to this alias.
+- crawler configuration;
+- EventBridge scheduling;
+- DynamoDB schemas;
+- target-table infrastructure;
+- alarm logger configuration;
+- SNS integration;
+- CloudWatch alarms;
+- Beta/Prod separation;
+- DynamoDB target loading;
+- target pagination;
+- CRUD API behaviour.
 
-### Canary Process
+---
+
+## Functional Tests
+
+Functional tests exercise application behaviour with mocked AWS resources.
+
+The CRUD functional test verifies a complete lifecycle:
 
 ```text
-Previous Lambda Version
-          |
-          |
-      live Alias
-          |
-          v
-   CodeDeploy starts
-          |
-          v
-10% traffic -> New Version
-90% traffic -> Previous Version
-          |
-          v
-     5 minute canary
-          |
-      +---+---+
-      |       |
-   Healthy   Alarm /
-      |      Failure
-      v       |
-Remaining     v
-90% moves   Automatic
-to new      Rollback
-version       |
-      |       v
-      v     Previous
-100% new    Version
+CREATE
+   |
+   v
+READ
+   |
+   v
+UPDATE
+   |
+   v
+DELETE
 ```
 
-The deployment configuration is:
+Crawler functional tests verify behaviour such as:
 
-`CANARY_10_PERCENT_5_MINUTES`
-
-This means the new version initially receives 10% of traffic.
-
-If the canary remains healthy for five minutes, CodeDeploy completes the
-traffic shift.
-
-The crawler error alarm is connected to the CodeDeploy deployment group. The
-deployment is configured for automatic rollback when:
-
-- the deployment enters an alarm state;
-- the deployment fails; or
-- the deployment is stopped.
-
-This reduces the risk of a faulty crawler release remaining active in the
-environment.
+- checking every configured target;
+- continuing after connection failures;
+- publishing the expected CloudWatch metrics;
+- HTTP failure handling;
+- configured request timeout;
+- empty target lists;
+- CloudWatch publication failures;
+- correct website metric dimensions.
 
 ---
 
-## Project Files
+## Automated CI Test Gate
 
-| File | Purpose |
-|---|---|
-| `app.py` | Creates the monitoring and pipeline stacks |
-| `kartikey/kartikey_stack.py` | Defines monitoring, alarms, Lambda versioning, alias and CodeDeploy rollback infrastructure |
-| `kartikey/pipeline_stack.py` | Defines Beta/Prod stages, automated build/test process and Prod approval |
-| `kartikey/resources/webHealth.py` | Checks websites and publishes health metrics |
-| `kartikey/resources/alarmLogger.py` | Processes SNS alarm events and writes records to DynamoDB |
-| `kartikey/resources/constants.py` | Stores shared application configuration |
-| `kartikey/resources/websites.json` | Defines the websites monitored by the crawler |
-| `kartikey/resources/CWPutData.py` | CloudWatch metric helper file |
-| `tests/unit/test_kartikey_stack.py` | Tests the synthesized infrastructure |
-| `tests/functional/` | Tests application behaviour without requiring the live AWS deployment |
-| `tests/integration/` | Contains tests used to verify deployed AWS environments |
-| `requirements.txt` | Runtime/CDK Python dependencies |
-| `requirements-dev.txt` | Development and testing dependencies |
-| `cdk.json` | Configures the AWS CDK application |
-| `RUNBOOK.md` | Operational verification and troubleshooting guide |
-| `README.md` | Project architecture, setup, testing and implementation documentation |
+The pipeline runs:
+
+```powershell
+python -m pytest tests/unit tests/functional -v
+```
+
+The current unit and functional suite contains:
+
+**29 passing tests**
+
+These tests are pipeline-blocking.
 
 ---
 
-## Monitored Websites
+## Live Integration Test
 
-| Website | URL |
-|---|---|
-| Western Sydney University | `https://www.westernsydney.edu.au/` |
-| AWS | `https://aws.amazon.com/` |
-| GitHub | `https://github.com/` |
+The project also contains:
+
+`tests/integration/test_target_api_integration.py`
+
+This test calls the deployed API rather than mocking AWS services.
+
+It verifies:
+
+```text
+API Gateway
+     |
+     v
+Target API Lambda
+     |
+     v
+Real DynamoDB Table
+```
+
+The integration lifecycle is:
+
+```text
+CREATE
+  ↓
+READ
+  ↓
+UPDATE
+  ↓
+READ UPDATED VALUE
+  ↓
+DELETE
+  ↓
+GET -> 404
+```
+
+The test also checks that DynamoDB operation timing is returned.
+
+The live Beta integration test completed successfully:
+
+```text
+1 passed
+```
+
+The integration test is deliberately separate from the normal pipeline build because it requires an already deployed API endpoint.
 
 ---
 
-## Website Health Metrics
+# Live Applied Project Verification
 
-The crawler publishes two custom metrics for every monitored website.
+## Beta
 
-### Availability
+The Beta environment was verified before production approval.
+
+Testing confirmed:
+
+- the target DynamoDB table contained the three seeded websites;
+- `GET /targets` returned the target list;
+- `POST /targets` created a temporary target;
+- `GET /targets/{id}` retrieved it;
+- `PUT /targets/{id}` updated it;
+- the updated data persisted;
+- `DELETE /targets/{id}` removed it;
+- a subsequent GET returned `404`;
+- DynamoDB read/write timing was returned;
+- the automated live integration test passed;
+- the scheduled crawler successfully processed the DynamoDB targets;
+- CloudWatch logs showed successful crawler executions.
+
+Only after Beta verification was production manually approved.
+
+---
+
+## Production
+
+The complete CodePipeline execution successfully deployed Prod.
+
+A production `GET /targets` returned:
+
+- AWS;
+- WesternSydneyUniversity;
+- GitHub;
+- `count = 3`;
+- DynamoDB operation timing.
+
+The production crawler CloudWatch logs also confirmed successful processing of all three targets.
+
+This demonstrated that the Applied Project worked in both deployment environments.
+
+---
+
+# Website Monitoring
+
+For each active target, the crawler publishes two custom metrics.
+
+## Availability
 
 Metric:
 
 `Availability`
 
-A successful request records:
+Successful request:
 
 `1`
 
-A failed request records:
+Failed request:
 
 `0`
 
-The availability alarm is triggered when minimum availability falls below `1`.
+The original website availability alarms trigger when availability falls below `1`.
 
-### Latency
+## Latency
 
 Metric:
 
@@ -292,70 +566,38 @@ Metric:
 
 Latency is measured in milliseconds.
 
-The latency alarm is triggered when average latency exceeds:
+The original latency alarms trigger when average latency exceeds:
 
 `3000 ms`
 
-The metrics use the website name as the CloudWatch dimension so each monitored
-website can be evaluated separately.
-
 ---
 
-## Crawler Operational Metrics
+# Crawler Operational Monitoring
 
-Week 11 extends monitoring beyond website availability.
-
-The project also monitors the operational health of the Lambda crawler using
-standard AWS Lambda CloudWatch metrics.
+The project monitors the Lambda crawler using standard Lambda metrics:
 
 | Metric | Purpose |
 |---|---|
 | Invocations | Number of crawler executions |
-| Errors | Number of failed Lambda executions |
-| Duration | Average crawler execution time |
-| Throttles | Number of throttled executions |
+| Errors | Failed executions |
+| Duration | Average execution duration |
+| Throttles | Throttled executions |
 
-These metrics provide operational feedback about whether the crawler itself is
-working correctly.
-
----
-
-## Operational Alarms
-
-Each environment contains the original website alarms plus crawler operational
-alarms.
-
-### Website Alarms
-
-For each of the three monitored websites:
-
-- one Availability alarm;
-- one Latency alarm.
-
-This produces six website health alarms per environment.
-
-### Crawler Alarms
-
-Three additional alarms monitor the crawler:
+Three crawler alarms are configured:
 
 | Alarm | Trigger |
 |---|---|
-| Crawler Errors | Errors greater than or equal to 1 |
-| Crawler Duration | Average execution duration greater than 30 seconds |
-| Crawler Throttles | Throttles greater than or equal to 1 |
+| Crawler Errors | Errors >= 1 |
+| Crawler Duration | Average duration > 30 seconds |
+| Crawler Throttles | Throttles >= 1 |
 
-Therefore, each Beta/Prod monitoring stack contains nine CloudWatch alarms.
-
-Crawler operational alarms treat missing data as not breaching.
-
-The crawler error alarm is also used by CodeDeploy to protect the canary
-deployment.
+Operational alarms treat missing data as non-breaching.
 
 ---
 
-## CloudWatch Dashboard
+# Dashboard
 
-The CloudWatch dashboard contains graphs for:
+The CloudWatch dashboard displays:
 
 - Website Availability
 - Website Latency
@@ -363,135 +605,166 @@ The CloudWatch dashboard contains graphs for:
 - Crawler Execution Duration
 - Crawler Throttles
 
-This provides one location for observing both application-level health and
-infrastructure/runtime health.
+This provides visibility into both the monitored websites and the monitoring application itself.
 
 ---
 
-## Alarm Notification and Logging
+# Alarm Notification Flow
 
-CloudWatch alarms publish notifications to an SNS topic.
-
-The SNS topic invokes the alarm logger Lambda.
-
-The logger stores alarm information in DynamoDB.
-
-### DynamoDB Alarm Record
-
-| Attribute | Purpose |
-|---|---|
-| `alarm_id` | Unique alarm event identifier and partition key |
-| `timestamp` | Event timestamp and sort key |
-| `alarm_name` | CloudWatch alarm name |
-| `new_state` | New CloudWatch alarm state |
-| `reason` | Explanation for the state change |
-
-This provides a persistent record of alarm activity rather than relying only on
-the current CloudWatch alarm state.
-
----
-
-## Beta and Prod Separation
-
-Beta and Prod use the same AWS account and region but have separate application
-resources and monitoring namespaces.
-
-| Resource | Beta | Prod |
-|---|---|---|
-| Monitoring Lambda | `kartikey-web-health-beta` | `kartikey-web-health-prod` |
-| Lambda alias | `live` | `live` |
-| Logger Lambda | `kartikey-alarm-logger-beta` | `kartikey-alarm-logger-prod` |
-| Metric namespace | `Kartikey/WebsiteMonitoring/Beta` | `Kartikey/WebsiteMonitoring/Prod` |
-| Dashboard | `Kartikey-Website-Health-Dashboard-beta` | `Kartikey-Website-Health-Dashboard-prod` |
-| SNS topic | `kartikey-website-alarm-notifications-beta` | `kartikey-website-alarm-notifications-prod` |
-| DynamoDB table | `Kartikey-Website-Alarm-Logs-beta` | `Kartikey-Website-Alarm-Logs-prod` |
-| CodeDeploy group | `Kartikey-Crawler-Deployment-beta` | `Kartikey-Crawler-Deployment-prod` |
-| Alarm suffix | `-beta` | `-prod` |
-
-Environment-specific names prevent Beta and Prod resources from overlapping.
-
-The monitoring Lambda receives its custom metric namespace through the
-`METRIC_NAMESPACE` environment variable.
-
----
-
-## Testing Strategy
-
-Testing is divided into multiple levels.
-
-### Unit Tests
-
-Unit tests validate the CDK infrastructure definition.
-
-They check infrastructure such as:
-
-- Lambda configuration
-- EventBridge scheduling
-- DynamoDB table schema
-- alarm logger configuration
-- SNS subscription
-- CloudWatch alarms
-- Beta and Prod resource separation
-
-### Functional Tests
-
-Functional tests verify application behaviour without depending on the live AWS
-environment.
-
-### Integration Tests
-
-Integration tests are used to validate deployed AWS resources and behaviour.
-
-Beta and Prod have previously been tested against the live AWS environment to
-confirm that the crawler executes and publishes monitoring information.
-
-### Automated Pipeline Gate
-
-Week 11 moves the local unit and functional test suites into the CI/CD build
-process.
-
-The pipeline executes:
-
-```powershell
-python -m pytest tests/unit tests/functional -v
+```text
+CloudWatch Alarm
+       |
+       v
+      SNS
+       |
+       v
+Alarm Logger Lambda
+       |
+       v
+Alarm Log DynamoDB
 ```
 
-If any test fails, CodeBuild returns a failure and CodePipeline stops before
-deploying the change.
-
-This creates an automated quality gate in the release process.
-
-At the latest local verification, all automated unit and functional tests
-passed successfully.
+Alarm records provide persistent history instead of relying only on the current CloudWatch alarm state.
 
 ---
 
-## Monitoring Configuration
+# Canary Deployment and Automatic Rollback
 
-| Setting | Value |
+The crawler uses an immutable Lambda version and a stable alias named:
+
+`live`
+
+EventBridge invokes the alias rather than `$LATEST`.
+
+AWS CodeDeploy uses:
+
+`CANARY_10_PERCENT_5_MINUTES`
+
+The deployment process is:
+
+```text
+New Lambda Version
+        |
+        v
+10% traffic to new version
+90% traffic to previous version
+        |
+        v
+5 minute canary period
+        |
+   +----+----+
+   |         |
+Healthy    Failure / Alarm
+   |         |
+   v         v
+100% new   Automatic rollback
+version    to previous version
+```
+
+Automatic rollback is configured when:
+
+- the crawler error alarm enters ALARM;
+- deployment fails; or
+- deployment is stopped.
+
+This reduces the impact of an unhealthy crawler release.
+
+---
+
+# Security
+
+Security considerations include:
+
+- AWS credentials are not stored in source code.
+- GitHub credentials are stored in AWS Secrets Manager.
+- IAM permissions are granted to specific Lambda functions.
+- The crawler receives read access to the target table.
+- The target API receives read/write access because it performs CRUD operations.
+- The alarm logger only requires access to its alarm table.
+- Beta and Prod use separate resources.
+- Production deployment requires manual approval.
+- CodeDeploy rollback protects the active crawler version.
+- URLs are validated before being accepted by the API.
+
+The REST API is intentionally public to satisfy the Applied Project requirement. In a production commercial system, authentication and authorization should be added using a mechanism such as IAM, Cognito or another API authorization layer.
+
+---
+
+# Performance
+
+Performance is considered through:
+
+- DynamoDB `PAY_PER_REQUEST` billing;
+- DynamoDB operation timing;
+- Lambda execution-duration monitoring;
+- website latency metrics;
+- a 10-second HTTP request timeout;
+- a five-minute monitoring schedule;
+- CloudWatch duration alarms.
+
+The API reports DynamoDB operation duration directly in each CRUD response and publishes timing metrics to CloudWatch.
+
+---
+
+# Reliability
+
+Reliability features include:
+
+- automated unit and functional testing;
+- Beta verification before production;
+- manual production approval;
+- separate Beta and Prod resources;
+- Lambda immutable versions;
+- stable `live` alias;
+- CodeDeploy canary releases;
+- automatic rollback;
+- CloudWatch alarms;
+- SNS notifications;
+- persistent alarm logging;
+- runtime target retrieval from DynamoDB;
+- initial target seeding.
+
+---
+
+# Usability
+
+The REST interface allows targets to be managed without editing crawler source code.
+
+The five CRUD endpoints use standard HTTP methods and JSON payloads.
+
+Meaningful HTTP status codes are returned for successful operations, validation errors, missing records and duplicate records.
+
+The CloudFormation `TargetApiUrl` output also makes the deployed endpoint easy to locate after deployment.
+
+---
+
+# Project Files
+
+| File | Purpose |
 |---|---|
-| Schedule | Every five minutes |
-| Lambda runtime | Python 3.13 |
-| Monitoring Lambda timeout | 60 seconds |
-| Website request timeout | 10 seconds |
-| Logger Lambda timeout | 30 seconds |
-| Website metric period | Five minutes |
-| Availability threshold | Minimum below 1 |
-| Latency threshold | Average above 3000 ms |
-| Crawler error threshold | Greater than or equal to 1 |
-| Crawler duration threshold | Greater than 30,000 ms |
-| Crawler throttle threshold | Greater than or equal to 1 |
-| Website alarm evaluation periods | 1 |
-| DynamoDB billing | PAY_PER_REQUEST |
-| Lambda alias | `live` |
-| CodeDeploy strategy | 10% canary for five minutes |
-| Automatic rollback | Enabled |
+| `app.py` | Creates the application and pipeline stacks |
+| `kartikey/kartikey_stack.py` | Defines application infrastructure |
+| `kartikey/pipeline_stack.py` | Defines CI/CD, Beta, Prod and approval |
+| `kartikey/resources/webHealth.py` | Loads DynamoDB targets, checks websites and publishes metrics |
+| `kartikey/resources/targetApi.py` | Implements CRUD target management |
+| `kartikey/resources/seedTargets.py` | Seeds initial DynamoDB targets |
+| `kartikey/resources/alarmLogger.py` | Stores alarm events in DynamoDB |
+| `kartikey/resources/constants.py` | Shared application configuration |
+| `kartikey/resources/websites.json` | Baseline infrastructure configuration and initial target definitions |
+| `tests/unit/test_target_api.py` | CRUD API unit tests |
+| `tests/unit/test_web_health.py` | Crawler unit tests |
+| `tests/unit/test_kartikey_stack.py` | CDK infrastructure tests |
+| `tests/functional/test_target_api_functional.py` | CRUD functional lifecycle test |
+| `tests/functional/test_crawler_functional.py` | Crawler functional tests |
+| `tests/integration/test_target_api_integration.py` | Live deployed CRUD integration test |
+| `RUNBOOK.md` | Operational verification and troubleshooting |
+| `README.md` | Main project and API documentation |
 
 ---
 
-## Setup
+# Setup
 
-### Prerequisites
+## Prerequisites
 
 Install:
 
@@ -501,305 +774,46 @@ Install:
 - AWS CLI
 - AWS CDK CLI
 
-Install the CDK CLI:
+Install CDK:
 
 ```powershell
 npm install -g aws-cdk
 ```
 
-AWS credentials must be configured for the AWS account used by the project.
-
-The pipeline expects an AWS Secrets Manager secret named:
-
-`github-token`
-
-The secret is used by the pipeline to access the GitHub repository.
-
-Tokens and AWS credentials must never be committed to GitHub.
-
----
-
-## Clone and Install
+Create and activate the virtual environment:
 
 ```powershell
-git clone https://github.com/Kartikeysachdeva-github/WSU2026.git
-cd WSU2026\Kartikey
-
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+```
 
+Install dependencies:
+
+```powershell
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
 ```
 
----
-
-## Verify AWS Identity
-
-Before deploying, verify the currently configured AWS identity:
+Verify the AWS identity before deployment:
 
 ```powershell
 aws sts get-caller-identity
 ```
 
-This helps prevent resources from being deployed to the wrong AWS account.
-
 ---
 
-## Bootstrap CDK
+# Local Verification
 
-The AWS environment must be bootstrapped before CDK Pipelines can deploy
-assets.
-
-For the configured account and region:
-
-```powershell
-cdk bootstrap aws://ACCOUNT-ID/us-east-1
-```
-
----
-
-## Local Verification
-
-Run all unit and functional tests:
+Run the pipeline-blocking test suites:
 
 ```powershell
 python -m pytest tests/unit tests/functional -v
 ```
 
-Synthesize the CDK application:
-
-```powershell
-cdk synth
-```
-
-A successful test run followed by successful synthesis provides a local check
-before committing the change.
-
----
-
-## Pipeline
-
-Pipeline name:
-
-`Kartikey-Website-Health-Pipeline`
-
-The source retrieves:
-
-`Kartikeysachdeva-github/WSU2026`
-
-Branch:
-
-`main`
-
-The pipeline build performs the following actions:
-
-1. Enters the `Kartikey` project directory.
-2. Installs the AWS CDK CLI.
-3. Installs `requirements.txt`.
-4. Installs `requirements-dev.txt`.
-5. Checks Python source files.
-6. Runs unit and functional tests.
-7. Synthesizes the CDK cloud assembly.
-8. Publishes deployment assets.
-9. Deploys Beta.
-10. Pauses for production approval.
-11. Deploys Prod after approval.
-
----
-
-## Development Roadmap
-
-| Week | Work Completed |
-|---|---|
-| 1 | Configured the development environment, repository, Python CDK application and initial synthesis |
-| 2 | Implemented Lambda website checks and CloudWatch metric publication |
-| 3 | Added multi-website monitoring, EventBridge scheduling, dashboard and website alarms |
-| 4–5 | Refactored monitoring infrastructure, reviewed DevOps workflow and maintained backlog/documentation |
-| 6 | Added SNS alarm notifications, alarm logger Lambda and DynamoDB alarm history |
-| 7 | Consolidated the monitoring solution and completed checklist verification |
-| 8 | No additional practical implementation |
-| 9 | Implemented AWS CDK Pipeline, Beta/Prod stages and manual production approval |
-| 10 | Continued deployment/testing work and AWS operational/security practical activities |
-| 11 | Added automated pipeline test gate, crawler operational metrics, operational alarms, Lambda versioning, `live` alias, CodeDeploy canary release and automatic rollback |
-
----
-
-## Verification Evidence
-
-The project has been tested at multiple stages of development.
-
-### Alarm Notification Flow
-
-A CloudWatch alarm state change was used to verify the path:
+Expected current result:
 
 ```text
-CloudWatch Alarm
-      ↓
-SNS
-      ↓
-Alarm Logger Lambda
-      ↓
-DynamoDB
-```
-
-The resulting DynamoDB record confirmed that the alarm notification and
-persistent logging path worked.
-
-### Beta and Prod Verification
-
-The deployment pipeline has previously completed:
-
-```text
-Source
-  ↓
-Synth
-  ↓
-Self-Mutate
-  ↓
-Assets
-  ↓
-Beta
-  ↓
-ApproveProd
-  ↓
-Prod
-```
-
-Live Beta and Prod integration testing confirmed that the deployed monitoring
-functions could execute and monitor the configured websites.
-
-### Week 11 Local Verification
-
-After adding operational monitoring and the canary/rollback infrastructure:
-
-- all unit and functional tests passed;
-- CDK synthesis completed successfully;
-- the CodeDeploy resources synthesized successfully;
-- the EventBridge target was changed to the versioned `live` alias;
-- automatic rollback was configured against the crawler error alarm.
-
-Final cloud deployment should also be checked in CodePipeline and CodeDeploy
-after the Week 11 commit is processed.
-
----
-
-## DevOps Concepts Demonstrated
-
-### Infrastructure as Code
-
-AWS resources are defined in Python using AWS CDK instead of being created
-manually.
-
-This makes the infrastructure repeatable, version controlled and easier to
-review.
-
-### Continuous Integration
-
-Every release executes automated tests and CDK synthesis in the pipeline.
-
-A failing automated test prevents the release from progressing.
-
-### Continuous Delivery
-
-Successful changes can move automatically through the build and Beta stages.
-
-Production remains protected by a manual approval gate.
-
-### Continuous Monitoring
-
-CloudWatch continuously collects website and Lambda operational metrics.
-
-Alarms provide feedback when the system becomes unhealthy.
-
-### Feedback
-
-Monitoring, alarms, SNS notifications and DynamoDB records provide feedback
-about the behaviour of the deployed system.
-
-### Safer Releases
-
-Lambda versions are immutable release points.
-
-The `live` alias provides a stable target for EventBridge while CodeDeploy
-controls which Lambda version receives production traffic.
-
-### Canary Deployment
-
-Only a percentage of traffic is initially exposed to a new crawler version,
-reducing the impact of a faulty release.
-
-### Automated Rollback
-
-CodeDeploy can return the `live` alias to the previous Lambda version if the
-deployment becomes unhealthy.
-
-Together, these features create a feedback loop:
-
-```text
-Code
- ↓
-Test
- ↓
-Build
- ↓
-Deploy
- ↓
-Monitor
- ↓
-Feedback
- ↓
-Rollback or Continue
-```
-
----
-
-## Quality and Limitations
-
-### Strengths
-
-- Infrastructure is defined as code.
-- Beta and Prod use separate physical resources.
-- Git provides version history.
-- Automated tests run before deployment.
-- Production requires manual approval.
-- Monitoring covers both website health and crawler operational health.
-- Alarm events are stored in DynamoDB.
-- Canary releases reduce deployment risk.
-- Automatic rollback protects the active Lambda alias.
-- The architecture is reproducible through CDK.
-
-### Current Limitations
-
-- The project monitors standard Lambda operational metrics such as invocations,
-  errors, duration and throttles. It does not currently publish a custom
-  Lambda memory-usage metric.
-- The crawler runs every five minutes, so a short canary period may receive a
-  limited number of scheduled invocations.
-- Live integration tests have been used for deployed-environment verification,
-  while the current pipeline build gate runs the unit and functional suites.
-- GitHub authentication depends on the configured Secrets Manager secret.
-- Beta and Prod are isolated by resource naming and namespaces but remain in
-  the same AWS account and region.
-- Dependency versions should be reviewed and pinned where stronger build
-  reproducibility is required.
-- Removing the pipeline does not necessarily remove all application resources,
-  retained data or CloudWatch logs.
-
----
-
-## Useful Commands
-
-Run automated tests:
-
-```powershell
-python -m pytest tests/unit tests/functional -v
-```
-
-Run live integration tests when the required environment is configured:
-
-```powershell
-python -m pytest tests/integration -v
+29 passed
 ```
 
 Check Python source:
@@ -808,28 +822,129 @@ Check Python source:
 python -m compileall -q app.py kartikey
 ```
 
-Synthesize the application:
+Synthesize the CDK application:
 
 ```powershell
 cdk synth
 ```
 
-List stacks:
+---
+
+# Running the Live Integration Test
+
+Set the deployed API endpoint:
 
 ```powershell
-cdk list
+$env:RUN_LIVE_TESTS = "1"
+$env:TARGET_API_URL = "YOUR-DEPLOYED-API-URL"
 ```
 
-Review pipeline changes:
+Run:
 
 ```powershell
-cdk diff KartikeyPipelineStack
+python -m pytest tests/integration/test_target_api_integration.py -v
 ```
 
-Deploy/update the pipeline:
+The test creates its own temporary target and cleans it up after testing.
+
+---
+
+# Development Roadmap
+
+| Stage | Work Completed |
+|---|---|
+| Weeks 1-2 | Development environment, CDK application, Lambda crawler and CloudWatch metrics |
+| Week 3 | Multi-site monitoring, EventBridge, dashboard and alarms |
+| Weeks 4-5 | Refactoring, DevOps workflow and project documentation |
+| Week 6 | SNS notifications, alarm logger and DynamoDB alarm history |
+| Week 7 | Consolidation and end-to-end verification |
+| Week 8 | No additional practical implementation |
+| Week 9 | CDK Pipeline, Beta/Prod stages and production approval |
+| Week 10 | Deployment and operational/security practical work |
+| Week 11 | Automated test gate, crawler operational monitoring, Lambda alias, CodeDeploy canary and rollback |
+| Applied Project | DynamoDB target database, public CRUD REST API, target seeding, crawler DynamoDB integration, timing metrics, expanded tests, Beta verification and Prod deployment |
+
+---
+
+# DevOps Practices Demonstrated
+
+## Infrastructure as Code
+
+AWS resources are defined using Python and AWS CDK. Infrastructure changes are therefore version controlled and repeatable.
+
+## Continuous Integration
+
+Changes pushed to GitHub enter CodePipeline. Unit and functional tests run before deployment.
+
+## Continuous Delivery
+
+Successful changes automatically deploy to Beta. Production remains protected by manual approval.
+
+## Continuous Monitoring
+
+CloudWatch monitors both website health and crawler operational health.
+
+## Feedback
+
+Metrics, alarms, SNS notifications, CloudWatch logs and DynamoDB alarm records provide feedback about the deployed application.
+
+## Safer Releases
+
+Lambda versions, the `live` alias, CodeDeploy canary deployment and automatic rollback reduce deployment risk.
+
+---
+
+# Quality Considerations and Limitations
+
+## Strengths
+
+- Infrastructure is version controlled through CDK.
+- Target management no longer requires crawler code changes.
+- DynamoDB provides a persistent runtime target list.
+- CRUD behaviour is tested at unit, functional and live integration levels.
+- CI automatically blocks releases when unit/functional tests fail.
+- Beta is verified before production.
+- Production requires manual approval.
+- Website and crawler health are continuously monitored.
+- Canary releases reduce deployment risk.
+- Automatic rollback protects the active crawler version.
+- Beta and Prod use separate application resources.
+
+## Current Limitations
+
+- The public API does not currently require authentication because public access is part of the Applied Project requirement.
+- `GET /targets` uses a DynamoDB scan, which is suitable for the small coursework target list but would require further design for a large production dataset.
+- The live integration test requires a deployed API and is therefore not part of the pre-deployment pipeline build gate.
+- The original per-website CloudWatch alarms are created from infrastructure configuration. Dynamically created targets receive crawler metrics but do not automatically create new CDK alarm resources.
+- Beta and Prod are separated by resource names and namespaces but use the same AWS account and region.
+- The crawler runs every five minutes, so a short canary window can contain a limited number of scheduled invocations.
+
+---
+
+# Useful Commands
+
+Run unit and functional tests:
 
 ```powershell
-cdk deploy KartikeyPipelineStack
+python -m pytest tests/unit tests/functional -v
+```
+
+Run integration test:
+
+```powershell
+python -m pytest tests/integration/test_target_api_integration.py -v
+```
+
+Check Python:
+
+```powershell
+python -m compileall -q app.py kartikey
+```
+
+Synthesize:
+
+```powershell
+cdk synth
 ```
 
 Check AWS identity:
@@ -838,123 +953,66 @@ Check AWS identity:
 aws sts get-caller-identity
 ```
 
-Check Git changes:
+Check Git:
 
 ```powershell
 git status
 ```
 
-Run all local verification before a release:
+---
 
-```powershell
-python -m pytest tests/unit tests/functional -v
-cdk synth
-git status
+# Presentation Summary
+
+The project can be presented as five connected parts.
+
+### 1. Manage
+
+The user manages crawler targets through API Gateway using standard CRUD operations.
+
+### 2. Store
+
+DynamoDB stores the current runtime target list.
+
+### 3. Monitor
+
+EventBridge invokes the crawler every five minutes. The crawler retrieves DynamoDB targets and publishes website health metrics.
+
+### 4. Observe and Respond
+
+CloudWatch dashboards and alarms provide operational feedback. SNS and the alarm logger provide notification and persistent alarm history.
+
+### 5. Release Safely
+
+GitHub changes enter CodePipeline. Automated tests protect the deployment, Beta is deployed first, Prod requires manual approval, and CodeDeploy provides canary deployment and automatic rollback.
+
+The resulting DevOps feedback loop is:
+
+```text
+Code
+  ↓
+Test
+  ↓
+Build
+  ↓
+Deploy Beta
+  ↓
+Verify
+  ↓
+Approve
+  ↓
+Deploy Prod
+  ↓
+Monitor
+  ↓
+Feedback / Rollback
 ```
 
 ---
 
-## Troubleshooting
+# Generative AI Acknowledgement
 
-### Pipeline Stops During Synth
+ChatGPT assisted with explanations, AWS CDK and Python code drafts, troubleshooting and documentation.
 
-Check the CodeBuild logs.
+I reviewed and applied the changes, executed the commands, tested the implementation and verified the deployed behaviour.
 
-Because automated tests are now part of the build, a failed test intentionally
-prevents deployment.
-
-Reproduce the check locally with:
-
-```powershell
-python -m pytest tests/unit tests/functional -v
-cdk synth
-```
-
-### No Website Metrics
-
-Check:
-
-1. EventBridge rule status.
-2. Lambda `live` alias.
-3. Lambda CloudWatch logs.
-4. `METRIC_NAMESPACE` environment variable.
-5. CloudWatch namespace for the correct environment.
-
-### Alarm Triggered
-
-Check:
-
-1. CloudWatch alarm reason.
-2. SNS topic.
-3. alarm logger Lambda logs.
-4. DynamoDB alarm record.
-
-### Canary Deployment Fails
-
-Check:
-
-1. AWS CodeDeploy deployment status.
-2. `Kartikey-Crawler-Errors-beta` or Prod equivalent.
-3. crawler Lambda logs.
-4. Lambda versions.
-5. `live` alias.
-6. CodeDeploy rollback status.
-
-If the monitored deployment enters the configured failure condition,
-CodeDeploy should move the alias back to the previous healthy version.
-
----
-
-## Presentation Summary
-
-The project can be explained as four connected stages:
-
-### 1. Monitor
-
-EventBridge runs a Lambda crawler every five minutes.
-
-The crawler checks three websites and publishes availability and latency
-metrics.
-
-### 2. Observe
-
-CloudWatch dashboards display website and Lambda operational health.
-
-CloudWatch alarms detect failures, slow responses, crawler errors, long
-execution times and throttling.
-
-### 3. Notify and Record
-
-CloudWatch sends alarm events to SNS.
-
-SNS invokes a logger Lambda that stores the alarm event in DynamoDB.
-
-### 4. Release Safely
-
-GitHub changes enter CodePipeline.
-
-Automated tests must pass before deployment.
-
-Beta is deployed before Prod.
-
-Prod requires manual approval.
-
-Lambda versions and the `live` alias allow CodeDeploy to perform a 10% canary
-release.
-
-If the release becomes unhealthy, automatic rollback protects the active
-environment.
-
----
-
-## Generative AI Acknowledgement
-
-ChatGPT assisted with explanations, AWS CDK code drafts, troubleshooting and
-documentation.
-
-I reviewed and applied the changes, executed the commands, tested the 
-implementation and verified deployment behaviour.
-
-Generative AI assistance should be acknowledged in accordance with the
-assessment requirements and Western Sydney University academic integrity
-requirements.
+Generative AI assistance should be acknowledged in accordance with the assessment requirements and Western Sydney University academic integrity requirements.

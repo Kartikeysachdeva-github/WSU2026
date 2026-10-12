@@ -1,47 +1,128 @@
-# Website Health Monitor Runbook
+# Website Health Monitor - Operational Runbook
 
-## Purpose
+## Student
 
-This runbook explains how to operate, verify and troubleshoot the Website
-Health Monitor in the Beta and Prod environments.
-
-The project uses:
-
-- AWS CDK for Infrastructure as Code
-- AWS Lambda for website monitoring and alarm logging
-- EventBridge for scheduled execution
-- CloudWatch for metrics, dashboards and alarms
-- SNS for alarm notifications
-- DynamoDB for alarm history
-- CodePipeline for CI/CD
-- CodeDeploy for canary deployment and automatic rollback
+**Name:** Kartikey Sachdeva
+**Student ID:** 22122045
+**Unit:** COMP2029 DevOps
+**Region:** `us-east-1`
 
 ---
 
-## Account and Region
+# 1. Purpose
 
-- Region: `us-east-1`
-- Pipeline: `Kartikey-Website-Health-Pipeline`
+This runbook explains how to operate, verify and troubleshoot the Website Health Monitor and Applied Project in the Beta and Prod environments.
 
-Before working with AWS:
+The deployed system uses:
+
+- AWS CDK for Infrastructure as Code
+- AWS CodePipeline for CI/CD
+- AWS Lambda for website monitoring, CRUD operations and alarm logging
+- Amazon API Gateway for the public target-management REST API
+- Amazon DynamoDB for crawler targets and alarm history
+- Amazon EventBridge for scheduled crawler execution
+- Amazon CloudWatch for metrics, dashboards, logs and alarms
+- Amazon SNS for alarm notifications
+- AWS CodeDeploy for canary deployment and automatic rollback
+
+The crawler target list is stored in DynamoDB and can be managed using the REST API.
+
+---
+
+# 2. Architecture
+
+```text
+                         User
+                          |
+                          v
+                    API Gateway
+                          |
+                          v
+                   CRUD API Lambda
+                          |
+                          v
+                  Targets DynamoDB
+                          ^
+                          |
+                          |
+EventBridge ------> Crawler Lambda
+ every 5 min        live alias
+                     |
+                     +------> Websites
+                     |
+                     +------> CloudWatch
+                                  |
+                           +------+------+
+                           |             |
+                       Dashboard       Alarms
+                                         |
+                                         v
+                                        SNS
+                                         |
+                                         v
+                                Alarm Logger Lambda
+                                         |
+                                         v
+                                Alarm Log DynamoDB
+```
+
+The main runtime change introduced by the Applied Project is:
+
+```text
+Before:
+websites.json -> Crawler
+
+Now:
+API Gateway -> CRUD Lambda -> DynamoDB <- Crawler
+```
+
+`websites.json` remains as baseline infrastructure configuration, while DynamoDB is the crawler's runtime target source.
+
+---
+
+# 3. Verify AWS Identity
+
+Before performing AWS operations:
 
 ```powershell
 aws sts get-caller-identity
 ```
 
-Confirm that the correct project account is being used.
+Confirm that the expected AWS account is being used.
+
+Region:
+
+```text
+us-east-1
+```
+
+Pipeline:
+
+```text
+Kartikey-Website-Health-Pipeline
+```
 
 ---
 
-## Select Environment
+# 4. Select Beta or Prod
 
-Run commands from the `Kartikey` project folder.
+Run commands from the `Kartikey` project directory.
 
-Choose `beta` or `prod`:
+Choose the environment:
 
 ```powershell
 $monitorDeployment = "beta"
+```
 
+or:
+
+```powershell
+$monitorDeployment = "prod"
+```
+
+Then run:
+
+```powershell
 switch ($monitorDeployment) {
     "beta" {
         $monitorSuffix = "-beta"
@@ -59,11 +140,16 @@ switch ($monitorDeployment) {
 }
 
 $monitorFunction = "kartikey-web-health$monitorSuffix"
+$monitorApiFunction = "kartikey-target-api$monitorSuffix"
+$monitorSeeder = "kartikey-target-seeder$monitorSuffix"
+
+$monitorTargetTable = "Kartikey-Website-Targets$monitorSuffix"
+$monitorAlarmTable = "Kartikey-Website-Alarm-Logs$monitorSuffix"
+
 $monitorLogger = "kartikey-alarm-logger$monitorSuffix"
-$monitorTable = "Kartikey-Website-Alarm-Logs$monitorSuffix"
+
 $monitorDashboard = "Kartikey-Website-Health-Dashboard$monitorSuffix"
 
-$monitorAvailabilityAlarm = "GitHub-Availability-Alarm$monitorSuffix"
 $monitorErrorAlarm = "Kartikey-Crawler-Errors$monitorSuffix"
 $monitorDurationAlarm = "Kartikey-Crawler-Duration$monitorSuffix"
 $monitorThrottleAlarm = "Kartikey-Crawler-Throttles$monitorSuffix"
@@ -71,56 +157,115 @@ $monitorThrottleAlarm = "Kartikey-Crawler-Throttles$monitorSuffix"
 $monitorDeploymentGroup = "Kartikey-Crawler-Deployment$monitorSuffix"
 ```
 
-Rerun this block whenever switching between Beta and Prod.
+Rerun this block when switching between environments.
 
 ---
 
-# 1. Local Verification
+# 5. Local Verification
 
-Activate the Python environment:
+Activate the virtual environment:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-Run the automated tests:
+Run the unit and functional tests:
 
 ```powershell
 python -m pytest tests/unit tests/functional -v
 ```
 
-Expected:
+Current expected result:
 
 ```text
-25 passed
+29 passed
 ```
 
-Then run:
+Check Python:
+
+```powershell
+python -m compileall -q app.py kartikey
+```
+
+Synthesize the CDK application:
 
 ```powershell
 cdk synth
 ```
 
-Both tests and synthesis should pass before committing code.
-
-Check repository state:
-
-```powershell
-git status
-```
-
-Do not commit temporary files such as:
-
-```text
-beta-response.json
-prod-response.json
-```
+All checks should pass before pushing a release.
 
 ---
 
-# 2. CI/CD Pipeline
+# 6. Live CRUD Integration Test
 
-The release process is:
+The Applied Project includes a live integration test:
+
+```text
+tests/integration/test_target_api_integration.py
+```
+
+It tests:
+
+```text
+API Gateway
+     |
+     v
+CRUD Lambda
+     |
+     v
+Real DynamoDB
+```
+
+The lifecycle is:
+
+```text
+CREATE
+  ↓
+READ
+  ↓
+UPDATE
+  ↓
+READ UPDATED VALUE
+  ↓
+DELETE
+  ↓
+GET -> 404
+```
+
+Configure the environment:
+
+```powershell
+$env:RUN_LIVE_TESTS = "1"
+$env:TARGET_API_URL = "YOUR-DEPLOYED-API-URL"
+```
+
+Run:
+
+```powershell
+python -m pytest tests/integration/test_target_api_integration.py -v
+```
+
+Expected:
+
+```text
+1 passed
+```
+
+Remove the variables afterward if required:
+
+```powershell
+Remove-Item Env:RUN_LIVE_TESTS -ErrorAction SilentlyContinue
+Remove-Item Env:TARGET_API_URL -ErrorAction SilentlyContinue
+```
+
+The live integration test is separate from the pipeline's unit and functional test gate because it requires an already deployed API.
+
+---
+
+# 7. CI/CD Pipeline
+
+Release flow:
 
 ```text
 GitHub main
@@ -133,8 +278,11 @@ Build / Synth
      |
      +--> Install dependencies
      +--> Compile Python
-     +--> Run unit + functional tests
+     +--> Run 29 unit + functional tests
      +--> CDK synth
+     |
+     v
+Assets / Self-Mutate
      |
      v
 Beta
@@ -145,10 +293,6 @@ Manual Approval
      v
 Prod
 ```
-
-Week 11 makes the automated tests pipeline-blocking.
-
-If a test fails, the pipeline stops before deployment.
 
 Check pipeline state:
 
@@ -161,9 +305,244 @@ aws codepipeline get-pipeline-state `
     --no-cli-pager
 ```
 
+A failing unit or functional test should stop the release before application deployment.
+
 ---
 
-# 3. Check Monitoring Lambda
+# 8. Verify Target DynamoDB Table
+
+The crawler's runtime targets are stored in:
+
+Beta:
+
+```text
+Kartikey-Website-Targets-beta
+```
+
+Prod:
+
+```text
+Kartikey-Website-Targets-prod
+```
+
+Scan the selected table:
+
+```powershell
+aws dynamodb scan `
+    --table-name $monitorTargetTable `
+    --region us-east-1 `
+    --output table `
+    --no-cli-pager
+```
+
+A newly deployed environment should initially contain:
+
+```text
+AWS
+WesternSydneyUniversity
+GitHub
+```
+
+The partition key is:
+
+```text
+target_id
+```
+
+---
+
+# 9. Initial Target Seeder
+
+The Lambda:
+
+```text
+kartikey-target-seeder-beta
+```
+
+or:
+
+```text
+kartikey-target-seeder-prod
+```
+
+initializes the target table during deployment.
+
+The seeder only creates missing records and does not intentionally overwrite an existing target.
+
+Check its configuration:
+
+```powershell
+aws lambda get-function-configuration `
+    --function-name $monitorSeeder `
+    --region us-east-1 `
+    --query "{State:State,Table:Environment.Variables.TARGET_TABLE_NAME}" `
+    --output json `
+    --no-cli-pager
+```
+
+Expected:
+
+- Lambda state is `Active`
+- `TARGET_TABLE_NAME` points to the correct Beta or Prod target table
+
+---
+
+# 10. Target CRUD API
+
+The public REST API provides:
+
+| Method | Endpoint | Operation |
+|---|---|---|
+| `POST` | `/targets` | Create |
+| `GET` | `/targets` | List |
+| `GET` | `/targets/{id}` | Read |
+| `PUT` | `/targets/{id}` | Update |
+| `DELETE` | `/targets/{id}` | Delete |
+
+Set the appropriate API URL:
+
+```powershell
+$ApiUrl = "YOUR-API-URL".TrimEnd("/")
+```
+
+---
+
+## List Targets
+
+```powershell
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets" `
+    -Method GET | ConvertTo-Json -Depth 10
+```
+
+Expected response includes:
+
+```text
+targets
+count
+operation_time_ms
+```
+
+---
+
+## Create Temporary Target
+
+```powershell
+$Body = @{
+    target_id = "runbook-test"
+    name      = "Runbook Test"
+    url       = "https://example.com"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets" `
+    -Method POST `
+    -ContentType "application/json" `
+    -Body $Body | ConvertTo-Json -Depth 10
+```
+
+Expected status:
+
+```text
+201 Created
+```
+
+---
+
+## Read Target
+
+```powershell
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets/runbook-test" `
+    -Method GET | ConvertTo-Json -Depth 10
+```
+
+---
+
+## Update Target
+
+```powershell
+$UpdateBody = @{
+    name = "Updated Runbook Test"
+    url  = "https://example.org"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets/runbook-test" `
+    -Method PUT `
+    -ContentType "application/json" `
+    -Body $UpdateBody | ConvertTo-Json -Depth 10
+```
+
+---
+
+## Delete Target
+
+```powershell
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets/runbook-test" `
+    -Method DELETE | ConvertTo-Json -Depth 10
+```
+
+Verify deletion:
+
+```powershell
+Invoke-RestMethod `
+    -Uri "$ApiUrl/targets/runbook-test" `
+    -Method GET
+```
+
+Expected:
+
+```text
+404 Target not found
+```
+
+---
+
+# 11. DynamoDB Read/Write Timing
+
+CRUD responses include:
+
+```json
+{
+  "operation_time_ms": 58.922
+}
+```
+
+The API also publishes CloudWatch timing metrics:
+
+```text
+DynamoDBReadTime
+DynamoDBWriteTime
+```
+
+These allow database performance to be observed in addition to CRUD correctness.
+
+---
+
+# 12. Check CRUD Lambda
+
+Run:
+
+```powershell
+aws lambda get-function-configuration `
+    --function-name $monitorApiFunction `
+    --region us-east-1 `
+    --query "{State:State,Table:Environment.Variables.TARGET_TABLE_NAME,Namespace:Environment.Variables.METRIC_NAMESPACE}" `
+    --output json `
+    --no-cli-pager
+```
+
+Check:
+
+- `State = Active`
+- target table matches the selected environment
+- metric namespace matches Beta or Prod
+
+---
+
+# 13. Check Crawler Lambda
 
 Run:
 
@@ -171,36 +550,37 @@ Run:
 aws lambda get-function-configuration `
     --function-name $monitorFunction `
     --region us-east-1 `
-    --query "{State:State,LastUpdateStatus:LastUpdateStatus,Namespace:Environment.Variables.METRIC_NAMESPACE}" `
+    --query "{State:State,LastUpdateStatus:LastUpdateStatus,Namespace:Environment.Variables.METRIC_NAMESPACE,TargetTable:Environment.Variables.TARGET_TABLE_NAME}" `
     --output json `
     --no-cli-pager
 ```
 
 Expected:
 
-- `State` = `Active`
-- `LastUpdateStatus` = `Successful`
-- Correct Beta or Prod metric namespace
-
-Beta:
-
 ```text
-Kartikey/WebsiteMonitoring/Beta
+State = Active
+LastUpdateStatus = Successful
 ```
 
-Prod:
+The target table must match:
 
 ```text
-Kartikey/WebsiteMonitoring/Prod
+Kartikey-Website-Targets-beta
 ```
+
+or:
+
+```text
+Kartikey-Website-Targets-prod
+```
+
+This proves the crawler is configured to use DynamoDB.
 
 ---
 
-# 4. Lambda Version and Live Alias
+# 14. Lambda Version and Live Alias
 
-Week 11 uses immutable Lambda versions and a `live` alias.
-
-Check published versions:
+Check published crawler versions:
 
 ```powershell
 aws lambda list-versions-by-function `
@@ -210,7 +590,7 @@ aws lambda list-versions-by-function `
     --no-cli-pager
 ```
 
-Check the alias:
+Check the `live` alias:
 
 ```powershell
 aws lambda get-alias `
@@ -223,7 +603,7 @@ aws lambda get-alias `
 
 The alias should point to a numbered Lambda version.
 
-The normal execution path is:
+Runtime path:
 
 ```text
 EventBridge
@@ -232,14 +612,12 @@ EventBridge
 live Alias
      |
      v
-Lambda Version
+Published Lambda Version
 ```
-
-CodeDeploy controls the `live` alias during a release.
 
 ---
 
-# 5. Invoke the Monitor
+# 15. Invoke the Crawler Manually
 
 Invoke through the `live` alias:
 
@@ -252,25 +630,59 @@ aws lambda invoke `
     --payload '{}' `
     "$env:TEMP\kartikey-$monitorDeployment-response.json" `
     --no-cli-pager
+```
 
+View the result:
+
+```powershell
 Get-Content "$env:TEMP\kartikey-$monitorDeployment-response.json"
 ```
 
-Check:
+Check that:
 
-- no `FunctionError`
-- HTTP response from each website
-- Availability value
-- Latency value
-
-A successful AWS invocation alone does not prove that all website checks
-succeeded.
+- there is no `FunctionError`;
+- targets were loaded;
+- websites were requested;
+- availability values were generated;
+- latency values were generated.
 
 ---
 
-# 6. Check EventBridge Schedule
+# 16. Verify Crawler Logs
 
-Run:
+Open:
+
+```text
+AWS Console
+→ Lambda
+→ kartikey-web-health-beta/prod
+→ Monitor
+→ View CloudWatch logs
+→ Latest log stream
+```
+
+A healthy execution should show the configured DynamoDB targets being processed and finish with:
+
+```text
+END
+REPORT
+```
+
+The Applied Project was verified with:
+
+```text
+AWS
+WesternSydneyUniversity
+GitHub
+```
+
+being processed successfully in both Beta and Prod.
+
+---
+
+# 17. EventBridge Schedule
+
+Check the schedule:
 
 ```powershell
 aws events list-rules `
@@ -287,20 +699,20 @@ ENABLED
 rate(5 minutes)
 ```
 
-For Beta and Prod, EventBridge should invoke the `live` Lambda alias.
+EventBridge should invoke the crawler's `live` alias.
 
 ---
 
-# 7. Website Metrics
+# 18. Website Metrics
 
-The crawler publishes two custom metrics:
+The crawler publishes:
 
 ```text
 Availability
 Latency
 ```
 
-Check available metrics:
+List the selected environment's metrics:
 
 ```powershell
 aws cloudwatch list-metrics `
@@ -310,39 +722,31 @@ aws cloudwatch list-metrics `
     --no-cli-pager
 ```
 
-The project monitors:
-
-- Western Sydney University
-- AWS
-- GitHub
-
-Availability normally reports:
+Availability:
 
 ```text
 1 = available
 0 = unavailable
 ```
 
-Latency records the response time.
+Latency is measured in milliseconds.
+
+Because targets are now loaded dynamically, a target created through the API can be checked by a later crawler execution without redeploying the crawler.
 
 ---
 
-# 8. Operational Metrics
+# 19. Crawler Operational Metrics
 
-Week 11 adds operational monitoring for the crawler Lambda.
-
-The metrics are:
+The crawler is also monitored using standard Lambda metrics:
 
 | Metric | Purpose |
 |---|---|
-| Invocations | Number of crawler executions |
+| Invocations | Number of executions |
 | Errors | Failed executions |
-| Duration | Execution time |
+| Duration | Execution duration |
 | Throttles | Throttled executions |
 
-These are standard `AWS/Lambda` CloudWatch metrics.
-
-This means the project monitors both:
+This provides monitoring for both:
 
 ```text
 Website health
@@ -352,7 +756,7 @@ Crawler health
 
 ---
 
-# 9. Dashboard
+# 20. CloudWatch Dashboard
 
 Open:
 
@@ -374,7 +778,7 @@ Prod:
 Kartikey-Website-Health-Dashboard-prod
 ```
 
-The dashboard contains:
+The dashboard includes:
 
 - Website Availability
 - Website Latency
@@ -384,34 +788,19 @@ The dashboard contains:
 
 ---
 
-# 10. CloudWatch Alarms
+# 21. CloudWatch Alarms
 
-Each environment contains six website alarms:
+Each environment contains the original website alarms plus crawler operational alarms.
 
-```text
-3 Availability alarms
-3 Latency alarms
-```
-
-Week 11 adds three crawler alarms:
+Crawler alarms:
 
 ```text
-Crawler Errors
-Crawler Duration
-Crawler Throttles
+Kartikey-Crawler-Errors-beta/prod
+Kartikey-Crawler-Duration-beta/prod
+Kartikey-Crawler-Throttles-beta/prod
 ```
 
-Total:
-
-```text
-6 website alarms
-+
-3 crawler alarms
-=
-9 alarms per environment
-```
-
-Check the operational alarms:
+Check:
 
 ```powershell
 aws cloudwatch describe-alarms `
@@ -425,7 +814,7 @@ aws cloudwatch describe-alarms `
     --no-cli-pager
 ```
 
-Operational thresholds:
+Thresholds:
 
 | Alarm | Threshold |
 |---|---|
@@ -433,11 +822,11 @@ Operational thresholds:
 | Duration | > 30,000 ms |
 | Throttles | >= 1 |
 
-Missing operational data is treated as not breaching.
+Operational missing data is treated as not breaching.
 
 ---
 
-# 11. SNS and DynamoDB Alarm Logging
+# 22. SNS and Alarm History
 
 Alarm flow:
 
@@ -451,7 +840,7 @@ CloudWatch Alarm
 Alarm Logger Lambda
        |
        v
-    DynamoDB
+Alarm Log DynamoDB
 ```
 
 Check the logger:
@@ -465,91 +854,75 @@ aws lambda get-function-configuration `
     --no-cli-pager
 ```
 
-Check DynamoDB:
+Check alarm history:
 
 ```powershell
 aws dynamodb scan `
-    --table-name $monitorTable `
+    --table-name $monitorAlarmTable `
     --region us-east-1 `
     --query "Items[].{Alarm:alarm_name.S,State:new_state.S,Reason:reason.S,Time:timestamp.S}" `
     --output table `
     --no-cli-pager
 ```
 
-Alarm records contain information such as:
-
-```text
-alarm_name
-new_state
-reason
-timestamp
-```
-
 ---
 
-# 12. CodeDeploy Canary Deployment
+# 23. CodeDeploy Canary
 
-Week 11 adds AWS CodeDeploy.
-
-The deployment strategy is:
+Deployment strategy:
 
 ```text
 CANARY_10_PERCENT_5_MINUTES
 ```
 
-Release flow:
+Flow:
 
 ```text
-New Lambda Version
-        |
-        v
-    CodeDeploy
-        |
-        v
-     live Alias
-      /     \
-     /       \
-Previous     New
-Version     Version
-  90%        10%
-     \       /
-      \     /
-      5 minutes
-          |
-       Healthy?
-       /     \
-     Yes      No
-      |        |
-      v        v
-  Complete   Rollback
+Previous Version
+       |
+       +------------------+
+       |                  |
+       v                  v
+      90%                10%
+                         New Version
+                             |
+                       5 minute canary
+                             |
+                      +------+------+
+                      |             |
+                   Healthy       Failure
+                      |             |
+                      v             v
+                  100% New       Rollback
 ```
 
-This reduces deployment risk because the new version receives only a portion
-of traffic before the release completes.
+The canary reduces the impact of a faulty release.
 
 ---
 
-# 13. Automatic Rollback
+# 24. Automatic Rollback
 
-CodeDeploy monitors:
+CodeDeploy uses the crawler error alarm:
+
+Beta:
 
 ```text
 Kartikey-Crawler-Errors-beta
 ```
 
-or:
+Prod:
 
 ```text
 Kartikey-Crawler-Errors-prod
 ```
 
-Automatic rollback is configured when:
+Rollback is configured when:
 
-- the deployment enters the configured alarm state;
-- the deployment fails; or
-- the deployment is stopped.
+- the monitored deployment enters ALARM;
+- deployment fails;
+- deployment is stopped.
 
-Check the rollback alarm:
+Check the alarm:
 
 ```powershell
 aws cloudwatch describe-alarms `
@@ -560,96 +933,36 @@ aws cloudwatch describe-alarms `
     --no-cli-pager
 ```
 
-A healthy deployment should normally show:
+A healthy deployment normally reports:
 
 ```text
 State = OK
 ```
 
-If rollback occurs, check which version the alias points to:
-
-```powershell
-aws lambda get-alias `
-    --function-name $monitorFunction `
-    --name live `
-    --region us-east-1 `
-    --output json `
-    --no-cli-pager
-```
-
 ---
 
-# 14. Check CodeDeploy
+# 25. Production Approval Checklist
 
-List CodeDeploy applications:
+Before approving Prod, verify Beta:
 
-```powershell
-aws deploy list-applications `
-    --region us-east-1 `
-    --output table `
-    --no-cli-pager
-```
-
-CDK may generate the application name.
-
-After identifying it:
-
-```powershell
-$codeDeployApplication = "<APPLICATION-NAME>"
-```
-
-Check deployment groups:
-
-```powershell
-aws deploy list-deployment-groups `
-    --application-name $codeDeployApplication `
-    --region us-east-1 `
-    --output table `
-    --no-cli-pager
-```
-
-Expected deployment group:
-
-Beta:
-
-```text
-Kartikey-Crawler-Deployment-beta
-```
-
-Prod:
-
-```text
-Kartikey-Crawler-Deployment-prod
-```
-
-Check recent deployments:
-
-```powershell
-aws deploy list-deployments `
-    --application-name $codeDeployApplication `
-    --deployment-group-name $monitorDeploymentGroup `
-    --region us-east-1 `
-    --output table `
-    --no-cli-pager
-```
-
----
-
-# 15. Production Approval
-
-The pipeline intentionally pauses before Prod.
-
-Before approving production, verify Beta:
-
-- [x] Automated tests passed
-- [x] Build/Synth passed
+- [x] Unit and functional tests passed
+- [x] CDK synth passed
 - [x] Beta deployment succeeded
-- [x] Beta `live` alias exists
-- [x] Beta alias points to a numbered Lambda version
-- [x] Beta crawler error alarm is `OK`
-- [x] Beta reached the production approval gate
+- [x] Target DynamoDB table contains initial records
+- [x] Public CRUD API responds
+- [x] CREATE works
+- [x] READ works
+- [x] UPDATE works
+- [x] DELETE works
+- [x] Deleted target returns 404
+- [x] DynamoDB operation timing is returned
+- [x] Live CRUD integration test passed
+- [x] Crawler reads DynamoDB targets
+- [x] Crawler logs show successful executions
+- [x] `live` alias exists
+- [x] Crawler error alarm is healthy
 
-Then approve:
+Production can then be approved through:
 
 ```text
 CodePipeline
@@ -659,70 +972,148 @@ CodePipeline
 → Approve
 ```
 
-After approval, verify Prod using the same checks.
+The Applied Project production deployment has been successfully completed and verified.
 
 ---
 
-# 16. Live Integration Tests
+# 26. Applied Project Verified Status
 
-For Beta:
+The final implementation includes:
 
-```powershell
-$env:RUN_LIVE_TESTS = "1"
-$env:TEST_STAGE = "Beta"
-
-python -m pytest tests/integration -v
-```
-
-For Prod:
-
-```powershell
-$env:RUN_LIVE_TESTS = "1"
-$env:TEST_STAGE = "Prod"
-
-python -m pytest tests/integration -v
-```
-
-Remove the variables afterwards:
-
-```powershell
-Remove-Item Env:RUN_LIVE_TESTS -ErrorAction SilentlyContinue
-Remove-Item Env:TEST_STAGE -ErrorAction SilentlyContinue
-```
-
-These live tests are separate from the unit and functional tests that run
-inside CodePipeline.
-
----
-
-# 17. Deploying Changes
-
-Before pushing:
-
-```powershell
-python -m pytest tests/unit tests/functional -v
-cdk synth
-git status
-```
-
-Then:
-
-```powershell
-git add <intended-files>
-git commit -m "Describe the change"
-git push origin main
-```
-
-Do not commit:
-
-- AWS credentials
-- GitHub tokens
-- secret values
-- temporary response JSON files
+- [x] Public API Gateway
+- [x] CRUD Lambda
+- [x] Target DynamoDB table
+- [x] Initial target seeding
+- [x] `POST /targets`
+- [x] `GET /targets`
+- [x] `GET /targets/{id}`
+- [x] `PUT /targets/{id}`
+- [x] `DELETE /targets/{id}`
+- [x] DynamoDB read timing
+- [x] DynamoDB write timing
+- [x] Crawler reads DynamoDB targets
+- [x] DynamoDB pagination support in crawler
+- [x] 29 unit/functional tests passing
+- [x] Unit/functional tests pipeline-blocking
+- [x] Live CRUD integration test passing
+- [x] CDK synthesis passing
+- [x] Beta deployed and verified
+- [x] Manual production approval
+- [x] Prod deployed and verified
+- [x] Prod API returns three seeded targets
+- [x] Prod crawler processes DynamoDB targets
+- [x] CloudWatch monitoring
+- [x] SNS alarm flow
+- [x] Alarm history DynamoDB
+- [x] Lambda versions and `live` alias
+- [x] CodeDeploy canary
+- [x] Automatic rollback
 
 ---
 
-# 18. Troubleshooting
+# 27. Troubleshooting
+
+## API Returns 500
+
+Check:
+
+- Target API Lambda logs
+- `TARGET_TABLE_NAME`
+- DynamoDB permissions
+- CloudWatch metric permission
+- request body
+
+Lambda:
+
+```text
+kartikey-target-api-beta/prod
+```
+
+---
+
+## API Returns 400
+
+Check:
+
+- JSON body is valid
+- `target_id` is supplied when creating
+- `name` is supplied
+- `url` is supplied
+- URL begins with `http://` or `https://`
+
+---
+
+## API Returns 404
+
+For:
+
+```text
+GET /targets/{id}
+PUT /targets/{id}
+DELETE /targets/{id}
+```
+
+confirm that the requested `target_id` exists.
+
+---
+
+## API Returns 409
+
+A target with that `target_id` already exists.
+
+Use another ID or update the existing record with PUT.
+
+---
+
+## Target Table Is Empty
+
+Check:
+
+- target seeder Lambda;
+- seeder CloudWatch logs;
+- target table environment variable;
+- DynamoDB write permission;
+- CloudFormation deployment status.
+
+---
+
+## Crawler Processes No Targets
+
+Check:
+
+```text
+TARGET_TABLE_NAME
+```
+
+on the crawler Lambda.
+
+Then scan:
+
+```powershell
+aws dynamodb scan `
+    --table-name $monitorTargetTable `
+    --region us-east-1 `
+    --output table `
+    --no-cli-pager
+```
+
+Also inspect the crawler CloudWatch logs.
+
+---
+
+## Website Availability Is 0
+
+Check:
+
+- URL stored in DynamoDB;
+- crawler logs;
+- HTTP status;
+- website availability;
+- request timeout.
+
+Do not edit `websites.json` to fix a runtime CRUD target. Runtime target management should be performed through the API/DynamoDB.
+
+---
 
 ## Pipeline Test Failure
 
@@ -732,7 +1123,9 @@ Run locally:
 python -m pytest tests/unit tests/functional -v
 ```
 
-Fix the first failing test before pushing again.
+Fix the first failure before pushing again.
+
+---
 
 ## CDK Synth Failure
 
@@ -742,191 +1135,115 @@ Run:
 cdk synth
 ```
 
-Check the first CDK/Python error.
+Resolve the first CDK/Python error.
 
-## Website Availability Is 0
-
-Check:
-
-- URL in `websites.json`
-- crawler Lambda logs
-- HTTP response
-- request timeout
-- whether the website is actually unavailable
+---
 
 ## Metrics Missing
 
 Check:
 
-- EventBridge is enabled
-- Lambda executed
-- correct namespace is selected
-- `METRIC_NAMESPACE` is correct
-- Lambda has `cloudwatch:PutMetricData`
-- CloudWatch time range is correct
+- EventBridge enabled;
+- crawler execution logs;
+- correct CloudWatch namespace;
+- `METRIC_NAMESPACE`;
+- Lambda `cloudwatch:PutMetricData` permission;
+- CloudWatch time range.
+
+---
 
 ## Crawler Error Alarm
 
 Check:
 
-- crawler Lambda logs
-- CodeDeploy deployment status
-- `live` alias
-- current Lambda version
+- crawler logs;
+- CodeDeploy deployment;
+- `live` alias;
+- Lambda version;
+- DynamoDB target configuration.
 
-An error during deployment may cause automatic rollback.
-
-## High Duration
-
-Check:
-
-- Lambda Duration metric
-- website response times
-- crawler logs
-- HTTP timeouts
-
-The alarm threshold is 30 seconds.
-
-## Throttling
-
-Check:
-
-- Lambda concurrency
-- unexpected invocations
-- EventBridge schedule
-- Lambda account limits
-
-## DynamoDB Has No Alarm Record
-
-Check:
-
-- CloudWatch alarm action
-- SNS topic
-- logger Lambda subscription
-- logger Lambda logs
-- table environment variable
-- DynamoDB permissions
+A deployment-time error may cause automatic rollback.
 
 ---
 
-# 19. Week 11 Implementation Status
+## DynamoDB Alarm History Missing
 
-The Week 11 implementation now includes:
+Check:
 
-- [x] Crawler invocation monitoring
-- [x] Crawler error monitoring
-- [x] Crawler duration monitoring
-- [x] Crawler throttle monitoring
-- [x] Operational CloudWatch alarms
-- [x] Operational dashboard widgets
-- [x] Automated tests added to CodePipeline
-- [x] 25 local unit/functional tests passing
-- [x] CDK synthesis passing
-- [x] Lambda immutable version
-- [x] Lambda `live` alias
-- [x] EventBridge uses the alias
-- [x] CodeDeploy deployment group
-- [x] 10% / five-minute canary
-- [x] Crawler error alarm connected to CodeDeploy
-- [x] Automatic rollback configured
-- [x] Final Week 11 Beta deployment verified
-- [ ] Final Week 11 Prod deployment verified
+- CloudWatch alarm action;
+- SNS topic;
+- logger Lambda subscription;
+- logger Lambda logs;
+- `ALARM_TABLE_NAME`;
+- DynamoDB permissions.
 
-### Current Beta Verification
+---
 
-Beta has successfully reached the production approval stage.
+# 28. Deploying Changes
 
-The `live` alias was verified:
+Before pushing:
 
-```text
-Name: live
-FunctionVersion: 1
-Description: Live version of the website health crawler.
+```powershell
+python -m pytest tests/unit tests/functional -v
+python -m compileall -q app.py kartikey
+cdk synth
+git status
 ```
 
-The Beta crawler error alarm was also verified:
+Then stage only intended files:
 
-```text
-Kartikey-Crawler-Errors-beta
-State: OK
-Latest Errors datapoint: 0
-Threshold: 1
+```powershell
+git add <intended-files>
+git commit -m "Describe the change"
+git push origin main
 ```
 
-This confirms that Beta is healthy enough to proceed through the manual
-production approval gate.
+Never commit:
 
-Prod should only be marked complete after its deployment finishes and the
-production alias/alarm are checked.
-
----
-
-# 20. Previous Verified Functionality
-
-Earlier project testing already verified:
-
-- EventBridge executes the crawler every five minutes.
-- The crawler checks Western Sydney University, AWS and GitHub.
-- Website Availability and Latency are published to CloudWatch.
-- CloudWatch alarms trigger SNS.
-- SNS invokes the alarm logger Lambda.
-- Alarm information is stored in DynamoDB.
-- Beta and Prod use separate resources and namespaces.
-- Manual approval prevents automatic promotion into Prod.
-- Live Beta and Prod integration tests passed before the Week 11 changes.
-
-Week 11 builds on this foundation by adding automated pipeline testing,
-operational monitoring, canary deployment and rollback.
+- AWS credentials
+- GitHub tokens
+- secret values
+- temporary API response files
 
 ---
 
-# 21. Quick Presentation Explanation
+# 29. Quick Presentation Explanation
 
-If asked **what the project does**:
+## What does the project do?
 
-> The project is an automated website health monitoring system built using
-> Python and AWS CDK. EventBridge runs a Lambda crawler every five minutes. It
-> checks Western Sydney University, AWS and GitHub and publishes Availability
-> and Latency metrics to CloudWatch. CloudWatch also monitors the operational
-> health of the crawler. Alarms are sent through SNS to another Lambda, which
-> stores alarm history in DynamoDB.
+> The project is an AWS-based website health monitoring system. EventBridge invokes a Lambda crawler every five minutes. The crawler reads its current website targets from DynamoDB and checks each target for availability and latency. The results are published to CloudWatch for dashboards and alarms.
 
-If asked **how CI/CD works**:
+## What did the Applied Project add?
 
-> Changes are pushed to GitHub and picked up by CodePipeline. The pipeline
-> installs the dependencies, runs the automated unit and functional tests and
-> performs CDK synthesis. A failing test blocks the release. A successful build
-> deploys to Beta first, and production requires manual approval.
+> The Applied Project changed the target list from a static runtime configuration into a DynamoDB-backed system. I added a public API Gateway interface and a CRUD Lambda so targets can be created, read, updated and deleted without changing the crawler code.
 
-If asked **what Week 11 added**:
+## How does CRUD connect to the crawler?
 
-> Week 11 added operational Lambda metrics, pipeline-blocking automated tests,
-> Lambda versioning, a live alias, CodeDeploy canary deployment and automatic
-> rollback.
+> API Gateway sends CRUD requests to the target API Lambda. The Lambda changes records in the target DynamoDB table. Every time the scheduled crawler runs, it reads that same table, so the API and crawler share the same runtime source of truth.
 
-If asked **why use a canary**:
+## How did you test it?
 
-> A canary reduces deployment risk because only 10% of traffic is initially
-> directed to the new Lambda version. The release completes after the canary
-> period if it remains healthy.
+> I used unit tests for isolated logic and infrastructure, functional tests with mocked AWS resources, and a live integration test against the deployed Beta API. The live test performs create, read, update, delete and verifies a 404 after deletion.
 
-If asked **how rollback works**:
+## How does CI/CD work?
 
-> CodeDeploy monitors the crawler error alarm. If the deployment becomes
-> unhealthy, fails or is stopped, it is configured to roll the live alias back
-> to the previous Lambda version.
+> GitHub changes trigger CodePipeline. The build installs dependencies, compiles the Python code, runs 29 unit and functional tests and performs CDK synthesis. Successful changes deploy to Beta first. Production requires manual approval.
 
-If asked **why use Beta and Prod**:
+## Why Beta and Prod?
 
-> Beta provides a safe environment to validate a release before production.
-> Separate resources and CloudWatch namespaces also prevent Beta monitoring
-> data from mixing with production.
+> Beta provides a safe environment to verify a release before production. The environments use separate Lambda functions, DynamoDB tables, monitoring namespaces and other resources.
+
+## Why use a canary?
+
+> CodeDeploy initially sends only 10% of crawler traffic to a new Lambda version. If the deployment remains healthy for five minutes, the release completes. If it fails or the crawler error alarm enters ALARM, automatic rollback protects the active version.
+
+## What measures DynamoDB performance?
+
+> Each CRUD operation measures its DynamoDB execution time. The value is returned as `operation_time_ms` and read/write timing metrics are also published to CloudWatch.
 
 ---
 
-# 22. DevOps Flow
-
-The complete workflow is:
+# 30. Complete DevOps Flow
 
 ```text
 Develop
@@ -935,7 +1252,7 @@ Develop
 GitHub
    |
    v
-Automated Tests
+Unit + Functional Tests
    |
    v
 CDK Synth
@@ -943,8 +1260,11 @@ CDK Synth
    v
 Beta
    |
-   v
-Monitor
+   +--> CRUD API Verification
+   |
+   +--> Live Integration Test
+   |
+   +--> Crawler Verification
    |
    v
 Manual Approval
@@ -953,25 +1273,20 @@ Manual Approval
 Prod
    |
    v
-Canary
+CodeDeploy Canary
    |
    v
 CloudWatch
    |
-   v
-Healthy?
- /      \
-Yes      No
- |        |
- v        v
-Run    Rollback
-          |
-          v
-      Investigate
-          |
-          v
-         Fix
+   +-------- Healthy --------> Continue
+   |
+   +-------- Failure --------> Rollback
+                                 |
+                                 v
+                             Investigate
+                                 |
+                                 v
+                                Fix
 ```
 
-This demonstrates source control, Infrastructure as Code, automated testing,
-CI/CD, continuous monitoring, controlled releases and automated recovery.
+This workflow demonstrates source control, Infrastructure as Code, automated testing, CI/CD, runtime configuration, monitoring, controlled releases and automated recovery.
